@@ -1,121 +1,86 @@
-from enum import Enum
-from uuid import uuid4
+# DistQueue
 
-from fastapi import FastAPI, HTTPException, status
-from pydantic import BaseModel, Field
+DistQueue is a distributed task queue engine project. The final goal is to build a Redis-backed job queue system with FastAPI, PostgreSQL, Redis, worker processes, scheduling, retries, dead-letter queues, crash recovery, metrics, and benchmarking.
 
-app = FastAPI(title="DistQueue")
+This project is being built step by step to understand backend systems properly, instead of directly jumping into a large copy-pasted system.
 
-jobs = {}
+---
 
+## Current Status
 
-class JobStatus(str, Enum):
-    pending = "pending"
-    queued = "queued"
-    running = "running"
-    done = "done"
-    failed = "failed"
-    cancelled = "cancelled"
+Implemented a simple FastAPI backend with in-memory job storage.
 
+Features added:
 
-class JobCreate(BaseModel):
-    task_type: str
-    payload: dict = Field(default_factory=dict)
-    priority: int = Field(default=5, ge=1, le=10)
+- `GET /`
+- `GET /health`
+- `POST /jobs`
+- `GET /jobs/{job_id}`
+- Temporary in-memory storage using a Python dictionary
 
+What was learned:
 
-class JobStatusUpdate(BaseModel):
-    status: JobStatus
+- Backend receives HTTP requests and returns HTTP responses.
+- `GET` is used to fetch/read data from the server.
+- `POST` is used when the client sends data to the server to create something or perform an action.
+- JSON is used to send structured data between client and server.
+- FastAPI uses Python functions to define API endpoints.
+- Pydantic validates incoming request bodies.
+- In-memory storage is temporary and disappears when the server restarts.
 
-
-class JobResponse(BaseModel):
-    job_id: str
-    task_type: str
-    payload: dict
-    priority: int
-    status: JobStatus
+---
 
 
-@app.get("/")
-def root():
-    return {
-        "message": "DistQueue API is running"
-    }
+Improved the basic API into a more realistic job-management API.
 
+Features added:
 
-@app.get("/health")
-def health():
-    return {
-        "status": "ok"
-    }
+- `GET /jobs` to list all jobs
+- `GET /jobs?status_filter=pending` to filter jobs by status
+- `PATCH /jobs/{job_id}/status` to update job status
+- `POST /jobs/{job_id}/cancel` to cancel a job
+- Job status enum
+- Priority validation from 1 to 10
+- Response models
+- Proper HTTP status codes like `201`, `400`, `404`, and `422`
 
+What was learned:
 
-@app.post("/jobs", response_model=JobResponse, status_code=status.HTTP_201_CREATED)
-def create_job(request: JobCreate):
-    job_id = f"job_{uuid4().hex}"
+- A path parameter is a value inside the URL path used to identify a specific resource.
+  - Example: `/jobs/job_123`
+- A query parameter is an optional value after `?` in the URL, usually used for filtering, searching, sorting, or pagination.
+  - Example: `/jobs?status_filter=pending`
+- `PATCH` is used to update part of an existing resource.
+- Enums restrict values to a fixed allowed set.
+- Backend validation prevents invalid input from entering the system.
+- `400 Bad Request` means the request is logically invalid.
+- `404 Not Found` means the requested resource does not exist.
+- `422 Unprocessable Entity` means the request format was valid JSON, but the data failed validation.
 
-    job = {
-        "job_id": job_id,
-        "task_type": request.task_type,
-        "payload": request.payload,
-        "priority": request.priority,
-        "status": JobStatus.pending
-    }
+---
 
-    jobs[job_id] = job
+## Current API Endpoints
 
-    return job
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/` | Check if the API is running |
+| `GET` | `/health` | Health check endpoint |
+| `POST` | `/jobs` | Create a new job |
+| `GET` | `/jobs` | List all jobs |
+| `GET` | `/jobs?status_filter=pending` | List jobs filtered by status |
+| `GET` | `/jobs/{job_id}` | Get a specific job |
+| `PATCH` | `/jobs/{job_id}/status` | Update job status |
+| `POST` | `/jobs/{job_id}/cancel` | Cancel a job |
 
+---
 
-@app.get("/jobs", response_model=list[JobResponse])
-def list_jobs(status_filter: JobStatus | None = None):
-    if status_filter is None:
-        return list(jobs.values())
+## Example Job Creation Request
 
-    return [
-        job for job in jobs.values()
-        if job["status"] == status_filter
-    ]
-
-
-@app.get("/jobs/{job_id}", response_model=JobResponse)
-def get_job(job_id: str):
-    if job_id not in jobs:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Job not found"
-        )
-
-    return jobs[job_id]
-
-
-@app.patch("/jobs/{job_id}/status", response_model=JobResponse)
-def update_job_status(job_id: str, request: JobStatusUpdate):
-    if job_id not in jobs:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Job not found"
-        )
-
-    jobs[job_id]["status"] = request.status
-    return jobs[job_id]
-
-
-@app.post("/jobs/{job_id}/cancel", response_model=JobResponse)
-def cancel_job(job_id: str):
-    if job_id not in jobs:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Job not found"
-        )
-
-    current_status = jobs[job_id]["status"]
-
-    if current_status in [JobStatus.done, JobStatus.failed, JobStatus.cancelled]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot cancel job with status {current_status}"
-        )
-
-    jobs[job_id]["status"] = JobStatus.cancelled
-    return jobs[job_id]
+```json
+{
+  "task_type": "sleep_task",
+  "payload": {
+    "seconds": 5
+  },
+  "priority": 8
+}
