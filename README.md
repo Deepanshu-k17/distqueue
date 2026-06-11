@@ -84,3 +84,51 @@ What was learned:
   },
   "priority": 8
 }
+
+---
+
+### Day 3 — Clean Backend Structure
+
+Refactored the FastAPI app from one large `main.py` file into a cleaner backend structure.
+
+Added structure:
+
+```text
+app/
+  main.py
+  models.py
+  schemas.py
+  services.py
+  routes/
+    jobs.py---
+
+
+Refactored the FastAPI app from one large `main.py` file into a cleaner backend structure.
+
+Added structure:
+
+```text
+app/
+  main.py
+  models.py
+  schemas.py
+  services.py
+  routes/
+    jobs.py
+
+What each file does:
+
+main.py starts the FastAPI app and includes routers.
+models.py contains internal domain models like job status.
+schemas.py contains Pydantic request and response schemas.
+services.py contains business logic for creating, listing, updating, and cancelling jobs.
+routes/jobs.py contains HTTP API endpoints for job operations.
+
+What I learned:
+
+Real backend projects should not keep all logic inside main.py.
+APIRouter helps split APIs into separate route files.
+Routes should handle HTTP-specific behavior.
+Services should handle business logic.
+Schemas define the shape of input and output data.
+This separation will make it easier to add PostgreSQL and Redis later.
