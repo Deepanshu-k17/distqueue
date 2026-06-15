@@ -87,7 +87,6 @@ What was learned:
 
 ---
 
-### Day 3 — Clean Backend Structure
 
 Refactored the FastAPI app from one large `main.py` file into a cleaner backend structure.
 
@@ -132,3 +131,73 @@ Routes should handle HTTP-specific behavior.
 Services should handle business logic.
 Schemas define the shape of input and output data.
 This separation will make it easier to add PostgreSQL and Redis later.
+
+---
+
+Replaced temporary in-memory job storage with PostgreSQL.
+
+Added:
+
+- PostgreSQL using Docker Compose
+- SQLAlchemy database setup
+- `JobDB` database model
+- Database session dependency using `get_db`
+- Persistent job creation, listing, fetching, status update, and cancellation
+- `created_at` and `updated_at` timestamps
+
+What changed:
+
+Previously, jobs were stored in memory using:
+
+```python
+jobs = {}
+
+That meant all jobs disappeared when the server restarted.
+
+Now jobs are stored in PostgreSQL, so job data persists even after restarting the FastAPI server.
+
+What I learned:
+
+A database stores data permanently.
+A table stores records in rows and columns.
+SQLAlchemy ORM maps Python classes to database tables.
+A database session is used to communicate with the database.
+db.add() prepares a new row for insertion.
+db.commit() saves changes permanently.
+db.refresh() reloads the latest saved data from the database.
+Depends(get_db) injects a database session into FastAPI routes.
+
+---
+
+
+Upgraded the job database model to support future queue engine features.
+
+Added fields:
+
+- `queue_name`
+- `attempts`
+- `max_retries`
+- `run_at`
+- `locked_by`
+- `locked_at`
+- `error_message`
+- `completed_at`
+
+Also changed `payload` from string storage to PostgreSQL `JSONB`.
+
+Why these fields matter:
+
+- `queue_name` will support multiple queues.
+- `attempts` and `max_retries` will support retry logic.
+- `run_at` will support delayed jobs.
+- `locked_by` and `locked_at` will support worker crash recovery.
+- `error_message` will store failure reason.
+- `completed_at` will record when the job finished.
+
+What I learned:
+
+- Database schema design should prepare for future system behavior.
+- JSONB is useful when storing flexible JSON payloads in PostgreSQL.
+- `run_at` represents when a job is eligible to run.
+- Retry systems need attempt counters.
+- Worker crash recovery needs lock metadata.
