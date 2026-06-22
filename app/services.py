@@ -6,6 +6,7 @@ from app.db_models import JobDB
 from app.models import JobStatus
 from app.schemas import JobCreate
 from app.queue_ops import enqueue_delayed_job, enqueue_ready_job
+from app.tasks import execute_task
 
 
 def db_job_to_response(job: JobDB):
@@ -54,7 +55,6 @@ def create_job(db: Session, request: JobCreate):
         db.refresh(job)
     else:
         enqueue_delayed_job(job.queue_name, job.id, run_at.timestamp())
-
     return db_job_to_response(job)
 
 def list_jobs(db: Session, status_filter: JobStatus | None = None):
@@ -113,3 +113,70 @@ def cancel_job(db: Session, job_id: str):
     db.refresh(job)
 
     return db_job_to_response(job)
+
+def get_job_db_object(db: Session, job_id: str):
+    return db.query(JobDB).filter(JobDB.id == job_id).first()
+
+
+def mark_job_running(db: Session, job: JobDB):
+    job.status = JobStatus.running.value
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def mark_job_done(db: Session, job: JobDB):
+    job.status = JobStatus.done.value
+    job.completed_at = datetime.now(timezone.utc)
+    job.error_message = None
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def mark_job_failed(db: Session, job: JobDB, error_message: str):
+    job.status = JobStatus.failed.value
+    job.error_message = error_message
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def execute_job(db: Session, job_id: str):
+    job = get_job_db_object(db, job_id)
+
+    if job is None:
+        return {
+            "status": "missing",
+            "job_id": job_id,
+        }
+
+    if job.status in [
+        JobStatus.done.value,
+        JobStatus.cancelled.value,
+    ]:
+        return {
+            "status": "skipped",
+            "job_id": job_id,
+            "reason": f"Job already {job.status}",
+        }
+
+    mark_job_running(db, job)
+
+    try:
+        execute_task(job.task_type, job.payload)
+        mark_job_done(db, job)
+
+        return {
+            "status": "done",
+            "job_id": job_id,
+        }
+
+    except Exception as exc:
+        mark_job_failed(db, job, str(exc))
+
+        return {
+            "status": "failed",
+            "job_id": job_id,
+            "error": str(exc),
+        }

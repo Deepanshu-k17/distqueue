@@ -25,3 +25,13 @@ def enqueue_delayed_job(queue_name: str, job_id: str, run_at_timestamp: float):
         delayed_queue_key(queue_name),
         {job_id: run_at_timestamp},
     )
+
+
+def pop_ready_job(queue_name: str):
+    result = redis_client.zpopmin(ready_queue_key(queue_name), 1)
+
+    if not result:
+        return None
+
+    job_id, score = result[0]
+    return job_id

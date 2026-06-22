@@ -1,76 +1,114 @@
 # DistQueue
 
-DistQueue is a distributed task queue engine project. The final goal is to build a Redis-backed job queue system with FastAPI, PostgreSQL, Redis, worker processes, scheduling, retries, dead-letter queues, crash recovery, metrics, and benchmarking.
+DistQueue is a Redis-backed distributed task queue engine built step by step using FastAPI, PostgreSQL, Redis, SQLAlchemy, and Python worker processes.
 
-This project is being built step by step to understand backend systems properly, instead of directly jumping into a large copy-pasted system.
+The final goal is to build a backend system where users can submit jobs through an API, store durable job metadata in PostgreSQL, dispatch jobs through Redis queues, execute them using workers, support delayed jobs, retries, dead-letter queues, crash recovery, metrics, benchmarking, and Docker-based local setup.
+
+This project is being built incrementally to understand backend systems properly instead of directly copy-pasting a large system.
 
 ---
 
 ## Current Status
 
-Implemented a simple FastAPI backend with in-memory job storage.
+Implemented so far:
 
-Features added:
+* FastAPI backend
+* Clean route/schema/service/model structure
+* PostgreSQL persistence
+* Redis ready and delayed queues
+* Basic worker process
+* Dummy task execution
+* Job lifecycle updates
+* Error tracking
+* Completion timestamp tracking
 
-- `GET /`
-- `GET /health`
-- `POST /jobs`
-- `GET /jobs/{job_id}`
-- Temporary in-memory storage using a Python dictionary
+Current flow:
 
-What was learned:
-
-- Backend receives HTTP requests and returns HTTP responses.
-- `GET` is used to fetch/read data from the server.
-- `POST` is used when the client sends data to the server to create something or perform an action.
-- JSON is used to send structured data between client and server.
-- FastAPI uses Python functions to define API endpoints.
-- Pydantic validates incoming request bodies.
-- In-memory storage is temporary and disappears when the server restarts.
-
----
-
-
-Improved the basic API into a more realistic job-management API.
-
-Features added:
-
-- `GET /jobs` to list all jobs
-- `GET /jobs?status_filter=pending` to filter jobs by status
-- `PATCH /jobs/{job_id}/status` to update job status
-- `POST /jobs/{job_id}/cancel` to cancel a job
-- Job status enum
-- Priority validation from 1 to 10
-- Response models
-- Proper HTTP status codes like `201`, `400`, `404`, and `422`
-
-What was learned:
-
-- A path parameter is a value inside the URL path used to identify a specific resource.
-  - Example: `/jobs/job_123`
-- A query parameter is an optional value after `?` in the URL, usually used for filtering, searching, sorting, or pagination.
-  - Example: `/jobs?status_filter=pending`
-- `PATCH` is used to update part of an existing resource.
-- Enums restrict values to a fixed allowed set.
-- Backend validation prevents invalid input from entering the system.
-- `400 Bad Request` means the request is logically invalid.
-- `404 Not Found` means the requested resource does not exist.
-- `422 Unprocessable Entity` means the request format was valid JSON, but the data failed validation.
+```text
+Client
+  ↓
+FastAPI API
+  ↓
+PostgreSQL stores full job metadata
+  ↓
+Redis stores job_id for queue ordering
+  ↓
+worker.py pops job_id from Redis
+  ↓
+Worker loads job from PostgreSQL
+  ↓
+Worker executes task
+  ↓
+Worker updates job status in PostgreSQL
+```
 
 ---
 
-## Current API Endpoints
+## Tech Stack
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| `GET` | `/` | Check if the API is running |
-| `GET` | `/health` | Health check endpoint |
-| `POST` | `/jobs` | Create a new job |
-| `GET` | `/jobs` | List all jobs |
-| `GET` | `/jobs?status_filter=pending` | List jobs filtered by status |
-| `GET` | `/jobs/{job_id}` | Get a specific job |
-| `PATCH` | `/jobs/{job_id}/status` | Update job status |
-| `POST` | `/jobs/{job_id}/cancel` | Cancel a job |
+Current:
+
+* Python
+* FastAPI
+* Pydantic
+* Uvicorn
+* PostgreSQL
+* SQLAlchemy
+* Redis
+* Docker Compose
+
+Planned:
+
+* Scheduler process
+* Retry system
+* Dead-letter queue
+* Worker leases and crash recovery
+* Metrics endpoint
+* Benchmarking script
+* WebSocket monitoring dashboard
+
+---
+
+## Project Structure
+
+```text
+distqueue/
+  app/
+    __init__.py
+    main.py
+    config.py
+    database.py
+    db_models.py
+    models.py
+    schemas.py
+    services.py
+    queue_ops.py
+    redis_client.py
+    tasks.py
+    routes/
+      __init__.py
+      jobs.py
+  worker.py
+  docker-compose.yml
+  requirements.txt
+  README.md
+  .gitignore
+```
+
+---
+
+## API Endpoints
+
+| Method  | Endpoint                      | Purpose                 |
+| ------- | ----------------------------- | ----------------------- |
+| `GET`   | `/`                           | Check if API is running |
+| `GET`   | `/health`                     | Health check endpoint   |
+| `POST`  | `/jobs`                       | Create a new job        |
+| `GET`   | `/jobs`                       | List all jobs           |
+| `GET`   | `/jobs?status_filter=pending` | Filter jobs by status   |
+| `GET`   | `/jobs/{job_id}`              | Get a specific job      |
+| `PATCH` | `/jobs/{job_id}/status`       | Update job status       |
+| `POST`  | `/jobs/{job_id}/cancel`       | Cancel a job            |
 
 ---
 
@@ -78,33 +116,371 @@ What was learned:
 
 ```json
 {
+  "queue": "default",
   "task_type": "sleep_task",
   "payload": {
-    "seconds": 5
+    "seconds": 3
   },
-  "priority": 8
+  "priority": 8,
+  "delay_seconds": 0,
+  "max_retries": 3
 }
+```
+
+Example response:
+
+```json
+{
+  "job_id": "job_...",
+  "queue": "default",
+  "task_type": "sleep_task",
+  "payload": {
+    "seconds": 3
+  },
+  "priority": 8,
+  "status": "queued",
+  "attempts": 0,
+  "max_retries": 3,
+  "run_at": "...",
+  "locked_by": null,
+  "locked_at": null,
+  "error_message": null,
+  "completed_at": null,
+  "created_at": "...",
+  "updated_at": "..."
+}
+```
 
 ---
 
+## Job Status Values
 
-Refactored the FastAPI app from one large `main.py` file into a cleaner backend structure.
-
-Added structure:
+Allowed job statuses:
 
 ```text
-app/
-  main.py
-  models.py
-  schemas.py
-  services.py
-  routes/
-    jobs.py---
+pending
+queued
+running
+done
+failed
+cancelled
+```
 
+Status lifecycle currently supported:
 
-Refactored the FastAPI app from one large `main.py` file into a cleaner backend structure.
+```text
+queued -> running -> done
+queued -> running -> failed
+pending -> cancelled
+queued -> cancelled
+running -> cancelled
+```
 
-Added structure:
+---
+
+## Job Fields
+
+| Field                  | Purpose                             |
+| ---------------------- | ----------------------------------- |
+| `job_id`               | Unique job identifier               |
+| `queue` / `queue_name` | Queue where the job belongs         |
+| `task_type`            | Type of task to execute             |
+| `payload`              | Task input data                     |
+| `priority`             | Job priority from 1 to 10           |
+| `status`               | Current lifecycle state             |
+| `attempts`             | Number of execution attempts        |
+| `max_retries`          | Maximum retries allowed             |
+| `run_at`               | Time when job is eligible to run    |
+| `locked_by`            | Worker that claimed the job         |
+| `locked_at`            | Time when worker claimed the job    |
+| `error_message`        | Failure reason if job fails         |
+| `completed_at`         | Time when job finishes successfully |
+| `created_at`           | Job creation timestamp              |
+| `updated_at`           | Last update timestamp               |
+
+---
+
+## Redis Queues
+
+Redis is used as the fast queue dispatch layer.
+
+PostgreSQL stores full durable job metadata.
+
+Redis stores only job IDs and scores.
+
+Current Redis keys:
+
+```text
+queue:default:ready
+queue:default:delayed
+```
+
+### Ready Queue
+
+Immediate jobs go into:
+
+```text
+queue:{queue_name}:ready
+```
+
+Ready queue uses Redis sorted sets.
+
+Score logic:
+
+```text
+score = (-priority * 1_000_000_000) + current_timestamp_ms
+```
+
+Higher priority jobs receive lower scores, so they are picked earlier by Redis.
+
+### Delayed Queue
+
+Delayed jobs go into:
+
+```text
+queue:{queue_name}:delayed
+```
+
+Delayed queue score:
+
+```text
+score = run_at_timestamp
+```
+
+Later, the scheduler will move jobs from delayed queue to ready queue when `run_at <= current_time`.
+
+---
+
+## Worker
+
+The worker is a separate long-running process that picks jobs from Redis and executes them.
+
+Run worker:
+
+```bash
+python worker.py --queue default --poll-interval 2
+```
+
+Worker flow:
+
+```text
+ZPOPMIN queue:default:ready
+  ↓
+Get job_id
+  ↓
+Load job from PostgreSQL
+  ↓
+Mark job running
+  ↓
+Execute task
+  ↓
+If success: mark done and set completed_at
+  ↓
+If failure: mark failed and store error_message
+```
+
+Currently supported dummy tasks:
+
+```text
+sleep_task
+echo_task
+fail_task
+```
+
+Example successful task:
+
+```json
+{
+  "queue": "default",
+  "task_type": "sleep_task",
+  "payload": {
+    "seconds": 3
+  },
+  "priority": 8,
+  "delay_seconds": 0,
+  "max_retries": 3
+}
+```
+
+Example failing task:
+
+```json
+{
+  "queue": "default",
+  "task_type": "fail_task",
+  "payload": {},
+  "priority": 5,
+  "delay_seconds": 0,
+  "max_retries": 3
+}
+```
+
+---
+
+## Running Locally
+
+### 1. Start PostgreSQL and Redis
+
+```bash
+docker compose up -d
+```
+
+Check containers:
+
+```bash
+docker ps
+```
+
+Expected:
+
+```text
+distqueue-postgres
+distqueue-redis
+```
+
+### 2. Activate virtual environment
+
+```bash
+source .venv/bin/activate
+```
+
+### 3. Run FastAPI server
+
+```bash
+python -m uvicorn app.main:app --reload
+```
+
+Open API docs:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+### 4. Run worker
+
+Open another terminal:
+
+```bash
+cd /mnt/d/projects/distqueue
+source .venv/bin/activate
+python worker.py --queue default --poll-interval 2
+```
+
+---
+
+## Manual Redis Checks
+
+Open Redis CLI:
+
+```bash
+docker exec -it distqueue-redis redis-cli
+```
+
+Check ready queue:
+
+```bash
+ZRANGE queue:default:ready 0 -1 WITHSCORES
+```
+
+Check delayed queue:
+
+```bash
+ZRANGE queue:default:delayed 0 -1 WITHSCORES
+```
+
+Clear ready queue during development:
+
+```bash
+DEL queue:default:ready
+```
+
+Clear delayed queue during development:
+
+```bash
+DEL queue:default:delayed
+```
+
+---
+
+## Manual PostgreSQL Checks
+
+Open PostgreSQL:
+
+```bash
+docker exec -it distqueue-postgres psql -U distqueue -d distqueue
+```
+
+Check latest jobs:
+
+```sql
+SELECT id, queue_name, task_type, priority, status, attempts, max_retries, run_at, error_message, completed_at
+FROM jobs
+ORDER BY created_at DESC
+LIMIT 5;
+```
+
+Exit:
+
+```sql
+\q
+```
+
+---
+
+## Day-by-Day Progress
+
+### Day 1 — Basic FastAPI Backend
+
+Implemented:
+
+* `GET /`
+* `GET /health`
+* `POST /jobs`
+* `GET /jobs/{job_id}`
+* In-memory job storage using a Python dictionary
+
+Learned:
+
+* Backend receives HTTP requests and returns HTTP responses.
+* `GET` fetches data.
+* `POST` sends data to create something.
+* JSON is used to send structured data.
+* FastAPI defines API endpoints using Python functions.
+* Pydantic validates request bodies.
+* In-memory storage is temporary and disappears when the server restarts.
+
+---
+
+### Day 2 — Improved Job API
+
+Implemented:
+
+* `GET /jobs`
+* `GET /jobs?status_filter=pending`
+* `PATCH /jobs/{job_id}/status`
+* `POST /jobs/{job_id}/cancel`
+* Job status enum
+* Priority validation
+* Response models
+* Proper HTTP status codes
+
+Learned:
+
+* Path parameters identify specific resources.
+* Query parameters are used for filtering/searching/sorting/pagination.
+* `PATCH` updates part of an existing resource.
+* Enums restrict values to a fixed set.
+* `400` means logically invalid request.
+* `404` means resource not found.
+* `422` means validation failed.
+
+---
+
+### Day 3 — Clean Backend Structure
+
+Refactored from one large `main.py` file into a cleaner backend structure.
+
+Added:
 
 ```text
 app/
@@ -114,123 +490,161 @@ app/
   services.py
   routes/
     jobs.py
+```
 
-What each file does:
+Learned:
 
-main.py starts the FastAPI app and includes routers.
-models.py contains internal domain models like job status.
-schemas.py contains Pydantic request and response schemas.
-services.py contains business logic for creating, listing, updating, and cancelling jobs.
-routes/jobs.py contains HTTP API endpoints for job operations.
-
-What I learned:
-
-Real backend projects should not keep all logic inside main.py.
-APIRouter helps split APIs into separate route files.
-Routes should handle HTTP-specific behavior.
-Services should handle business logic.
-Schemas define the shape of input and output data.
-This separation will make it easier to add PostgreSQL and Redis later.
+* `main.py` should create the app and include routers.
+* `APIRouter` groups related endpoints.
+* `schemas.py` stores request/response models.
+* `services.py` stores business logic.
+* Routes should handle HTTP behavior.
+* Services should handle application logic.
 
 ---
+
+### Day 4 — PostgreSQL Persistence
 
 Replaced temporary in-memory job storage with PostgreSQL.
 
 Added:
 
-- PostgreSQL using Docker Compose
-- SQLAlchemy database setup
-- `JobDB` database model
-- Database session dependency using `get_db`
-- Persistent job creation, listing, fetching, status update, and cancellation
-- `created_at` and `updated_at` timestamps
+* PostgreSQL using Docker Compose
+* SQLAlchemy setup
+* `JobDB` database model
+* Database session dependency using `get_db`
+* Persistent job creation, listing, fetching, updating, and cancellation
+* `created_at` and `updated_at` timestamps
 
-What changed:
+Learned:
 
-Previously, jobs were stored in memory using:
-
-```python
-jobs = {}
-
-That meant all jobs disappeared when the server restarted.
-
-Now jobs are stored in PostgreSQL, so job data persists even after restarting the FastAPI server.
-
-What I learned:
-
-A database stores data permanently.
-A table stores records in rows and columns.
-SQLAlchemy ORM maps Python classes to database tables.
-A database session is used to communicate with the database.
-db.add() prepares a new row for insertion.
-db.commit() saves changes permanently.
-db.refresh() reloads the latest saved data from the database.
-Depends(get_db) injects a database session into FastAPI routes.
+* PostgreSQL stores data permanently.
+* SQLAlchemy ORM maps Python classes to database tables.
+* A database session communicates with the database during a request.
+* `db.add()` prepares an object for insertion.
+* `db.commit()` saves changes.
+* `db.refresh()` reloads saved database values into the Python object.
 
 ---
 
+### Day 5 — Expanded Job Database Model
 
-Upgraded the job database model to support future queue engine features.
+Upgraded the job database schema to support real queue features.
 
-Added fields:
+Added:
 
-- `queue_name`
-- `attempts`
-- `max_retries`
-- `run_at`
-- `locked_by`
-- `locked_at`
-- `error_message`
-- `completed_at`
+* `queue_name`
+* `attempts`
+* `max_retries`
+* `run_at`
+* `locked_by`
+* `locked_at`
+* `error_message`
+* `completed_at`
+* PostgreSQL `JSONB` payload storage
 
-Also changed `payload` from string storage to PostgreSQL `JSONB`.
+Learned:
 
-Why these fields matter:
-
-- `queue_name` will support multiple queues.
-- `attempts` and `max_retries` will support retry logic.
-- `run_at` will support delayed jobs.
-- `locked_by` and `locked_at` will support worker crash recovery.
-- `error_message` will store failure reason.
-- `completed_at` will record when the job finished.
-
-What I learned:
-
-- Database schema design should prepare for future system behavior.
-- JSONB is useful when storing flexible JSON payloads in PostgreSQL.
-- `run_at` represents when a job is eligible to run.
-- Retry systems need attempt counters.
-- Worker crash recovery needs lock metadata.
-
+* `queue_name` supports multiple queues.
+* `run_at` supports delayed jobs.
+* `attempts` and `max_retries` support retry logic.
+* `locked_by` and `locked_at` support future worker crash recovery.
+* `error_message` stores failure reason.
+* `completed_at` records successful completion time.
+* JSONB stores structured JSON payloads properly in PostgreSQL.
 
 ---
 
+### Day 6 — Redis Queue Layer
 
 Added Redis as the fast queue dispatch layer.
 
 Implemented:
 
-- Redis container in Docker Compose
-- Redis Python client
-- Ready queue using Redis sorted set
-- Delayed queue using Redis sorted set
-- Immediate job enqueue into `queue:{queue_name}:ready`
-- Delayed job enqueue into `queue:{queue_name}:delayed`
-- Priority-based scoring for ready jobs
-- Timestamp-based scoring for delayed jobs
+* Redis container in Docker Compose
+* Redis Python client
+* Ready queue using Redis sorted set
+* Delayed queue using Redis sorted set
+* Immediate jobs enqueued into `queue:{queue_name}:ready`
+* Delayed jobs enqueued into `queue:{queue_name}:delayed`
+* Priority-based score for ready jobs
+* Timestamp-based score for delayed jobs
 
-Queue behavior:
+Learned:
 
-- Jobs with `delay_seconds = 0` are added to the ready queue and marked as `queued`.
-- Jobs with `delay_seconds > 0` are added to the delayed queue and remain `pending`.
+* PostgreSQL stores full job data.
+* Redis stores job IDs for fast queue ordering.
+* Redis sorted sets order members by score.
+* `ZADD` adds a member with a score.
+* `ZRANGE ... WITHSCORES` shows queue order.
+* Higher-priority jobs can be picked earlier by giving them lower scores.
+* Delayed jobs can be ordered using `run_at` timestamps.
 
-Why Redis is used:
+---
 
-PostgreSQL stores full durable job metadata.
-Redis stores only job IDs for fast queue ordering and dispatch.
+### Day 7 — Basic Worker Process
 
-Redis keys:
+Added the first worker process for executing queued jobs.
 
-```text
-queue:default:ready
-queue:default:delayed
+Implemented:
+
+* `worker.py` command-line worker
+* Redis `ZPOPMIN` based ready queue popping
+* Dummy task handlers:
+
+  * `sleep_task`
+  * `echo_task`
+  * `fail_task`
+* Job execution lifecycle:
+
+  * `queued -> running -> done`
+  * `queued -> running -> failed`
+* PostgreSQL status updates from the worker
+* Error tracking using `error_message`
+* Completion tracking using `completed_at`
+
+Learned:
+
+* A worker is a separate long-running process.
+* The API should submit jobs, not execute them.
+* Redis stores the next job ID to process.
+* PostgreSQL stores full job metadata and lifecycle state.
+* `ZPOPMIN` removes and returns the next job from a Redis sorted set.
+* Worker loads job details from PostgreSQL before execution.
+* Successful jobs become `done`.
+* Failed jobs become `failed`.
+
+---
+
+## Current Limitations
+
+The system is not complete yet.
+
+Current limitations:
+
+* No scheduler for delayed jobs yet
+* No automatic retry logic yet
+* No dead-letter queue yet
+* No worker concurrency yet
+* No worker crash recovery yet
+* No metrics endpoint yet
+* No benchmark script yet
+* No dashboard yet
+* No Alembic migrations yet
+
+---
+
+## Planned Next Steps
+
+Next major steps:
+
+1. Add scheduler to move due delayed jobs into ready queue.
+2. Add retry system with exponential backoff.
+3. Add dead-letter queue for exhausted jobs.
+4. Add worker leases using `locked_by` and `locked_at`.
+5. Add crash recovery for stuck running jobs.
+6. Add worker concurrency.
+7. Add metrics endpoint.
+8. Add benchmark script.
+9. Add Docker Compose service definitions for API, worker, and scheduler.
+10. Add final README architecture diagrams and resume-ready benchmark results.
