@@ -201,3 +201,36 @@ What I learned:
 - `run_at` represents when a job is eligible to run.
 - Retry systems need attempt counters.
 - Worker crash recovery needs lock metadata.
+
+
+---
+
+
+Added Redis as the fast queue dispatch layer.
+
+Implemented:
+
+- Redis container in Docker Compose
+- Redis Python client
+- Ready queue using Redis sorted set
+- Delayed queue using Redis sorted set
+- Immediate job enqueue into `queue:{queue_name}:ready`
+- Delayed job enqueue into `queue:{queue_name}:delayed`
+- Priority-based scoring for ready jobs
+- Timestamp-based scoring for delayed jobs
+
+Queue behavior:
+
+- Jobs with `delay_seconds = 0` are added to the ready queue and marked as `queued`.
+- Jobs with `delay_seconds > 0` are added to the delayed queue and remain `pending`.
+
+Why Redis is used:
+
+PostgreSQL stores full durable job metadata.
+Redis stores only job IDs for fast queue ordering and dispatch.
+
+Redis keys:
+
+```text
+queue:default:ready
+queue:default:delayed

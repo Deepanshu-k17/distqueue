@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.db_models import JobDB
 from app.models import JobStatus
 from app.schemas import JobCreate
+from app.queue_ops import enqueue_delayed_job, enqueue_ready_job
 
 
 def db_job_to_response(job: JobDB):
@@ -46,8 +47,15 @@ def create_job(db: Session, request: JobCreate):
     db.commit()
     db.refresh(job)
 
-    return db_job_to_response(job)
+    if request.delay_seconds == 0:
+        enqueue_ready_job(job.queue_name, job.id, job.priority)
+        job.status = JobStatus.queued.value
+        db.commit()
+        db.refresh(job)
+    else:
+        enqueue_delayed_job(job.queue_name, job.id, run_at.timestamp())
 
+    return db_job_to_response(job)
 
 def list_jobs(db: Session, status_filter: JobStatus | None = None):
     query = db.query(JobDB)
