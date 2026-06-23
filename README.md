@@ -648,3 +648,120 @@ Next major steps:
 8. Add benchmark script.
 9. Add Docker Compose service definitions for API, worker, and scheduler.
 10. Add final README architecture diagrams and resume-ready benchmark results.
+
+
+---
+
+### Day 8 — Delayed Job Scheduler
+
+Added a scheduler process to move due delayed jobs into the ready queue.
+
+Implemented:
+
+- `scheduler.py` command-line scheduler
+- Redis `ZRANGEBYSCORE` lookup for due delayed jobs
+- Moving due jobs from `queue:{queue_name}:delayed` to `queue:{queue_name}:ready`
+- Updating delayed job status from `pending` to `queued`
+- End-to-end delayed execution with API, scheduler, worker, Redis, and PostgreSQL
+
+Current scheduler command:
+
+```bash
+python scheduler.py --queue default --poll-interval 2
+```
+
+Delayed job flow:
+
+```text
+POST /jobs with delay_seconds > 0
+  ↓
+PostgreSQL stores job as pending
+  ↓
+Redis delayed queue stores job_id with run_at timestamp score
+  ↓
+scheduler.py finds job when run_at <= current_time
+  ↓
+scheduler moves job_id to ready queue
+  ↓
+worker.py picks job
+  ↓
+worker marks job running then done/failed
+```
+
+What I learned:
+
+- Delayed jobs should not be executed immediately.
+- Redis sorted set scores can represent future execution timestamps.
+- `ZRANGEBYSCORE` can find jobs whose scheduled time has arrived.
+- Scheduler is a separate long-running process.
+- API, scheduler, and worker have separate responsibilities.
+
+Current limitation:
+
+- No retry scheduling yet.
+- No dead-letter queue yet.
+- No worker crash recovery yet.
+- No concurrency yet.
+
+
+---
+
+### Day 9 — Retry System with Exponential Backoff
+
+Added automatic retry scheduling for failed jobs.
+
+Implemented:
+
+- Retry-aware failure handling
+- `attempts` increment on task failure
+- `max_retries` based retry limit
+- Exponential backoff retry delay
+- Failed jobs reinserted into Redis delayed queue for future retry
+- Scheduler moves retry jobs back into ready queue when due
+- Worker retries jobs until success or retry limit is reached
+- `unstable_task` for testing jobs that fail first and succeed later
+
+Retry behavior:
+
+```text
+task fails
+  ↓
+attempts += 1
+  ↓
+if attempts < max_retries:
+    status = pending
+    run_at = now + retry_delay
+    enqueue into delayed queue
+else:
+    status = failed
+```
+
+Current retry delay:
+
+```text
+retry_delay = base_delay * 2^attempts
+```
+
+With base delay of 5 seconds:
+
+```text
+attempt 1 failure → retry after 10 seconds
+attempt 2 failure → retry after 20 seconds
+attempt 3 failure → retry after 40 seconds
+```
+
+What I learned:
+
+- Some failures are temporary and should be retried.
+- Retry logic needs attempt tracking.
+- `max_retries` prevents infinite retry loops.
+- Exponential backoff avoids retrying too aggressively.
+- Retry scheduling can reuse the delayed queue mechanism.
+- A job should only become finally failed after exhausting retries.
+
+Current limitations:
+
+- No dead-letter queue yet.
+- No retry jitter yet.
+- `unstable_task` uses in-memory simulation for testing.
+- No worker crash recovery yet.

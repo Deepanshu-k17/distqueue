@@ -35,3 +35,17 @@ def pop_ready_job(queue_name: str):
 
     job_id, score = result[0]
     return job_id
+
+
+def get_due_delayed_jobs(queue_name: str, now_timestamp: float, limit: int = 100):
+    return redis_client.zrangebyscore(
+        delayed_queue_key(queue_name),
+        min=0,
+        max=now_timestamp,
+        start=0,
+        num=limit,
+    )
+
+
+def remove_delayed_job(queue_name: str, job_id: str):
+    redis_client.zrem(delayed_queue_key(queue_name), job_id)

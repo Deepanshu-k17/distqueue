@@ -8,6 +8,18 @@ from app.schemas import JobCreate
 from app.queue_ops import enqueue_delayed_job, enqueue_ready_job
 from app.tasks import execute_task
 
+from app.queue_ops import (
+    enqueue_delayed_job,
+    enqueue_ready_job,
+    get_due_delayed_jobs,
+    remove_delayed_job,
+)
+
+BASE_RETRY_DELAY_SECONDS = 5
+
+
+def calculate_retry_delay(attempts: int):
+    return BASE_RETRY_DELAY_SECONDS * (2 ** attempts)
 
 def db_job_to_response(job: JobDB):
     return {
@@ -135,12 +147,47 @@ def mark_job_done(db: Session, job: JobDB):
 
 
 def mark_job_failed(db: Session, job: JobDB, error_message: str):
-    job.status = JobStatus.failed.value
+    job.attempts += 1
     job.error_message = error_message
+
+    if job.attempts < job.max_retries:
+        retry_delay = calculate_retry_delay(job.attempts)
+        retry_at = datetime.now(timezone.utc) + timedelta(seconds=retry_delay)
+
+        job.status = JobStatus.pending.value
+        job.run_at = retry_at
+
+        db.commit()
+        db.refresh(job)
+
+        enqueue_delayed_job(
+            queue_name=job.queue_name,
+            job_id=job.id,
+            run_at_timestamp=retry_at.timestamp(),
+        )
+
+        return {
+            "status": "scheduled_retry",
+            "job_id": job.id,
+            "attempts": job.attempts,
+            "max_retries": job.max_retries,
+            "retry_delay_seconds": retry_delay,
+            "run_at": retry_at,
+            "error": error_message,
+        }
+
+    job.status = JobStatus.failed.value
+
     db.commit()
     db.refresh(job)
-    return job
 
+    return {
+        "status": "failed",
+        "job_id": job.id,
+        "attempts": job.attempts,
+        "max_retries": job.max_retries,
+        "error": error_message,
+    }
 
 def execute_job(db: Session, job_id: str):
     job = get_job_db_object(db, job_id)
@@ -173,10 +220,37 @@ def execute_job(db: Session, job_id: str):
         }
 
     except Exception as exc:
-        mark_job_failed(db, job, str(exc))
+        return mark_job_failed(db, job, str(exc))
+def move_due_delayed_jobs(db: Session, queue_name: str, limit: int = 100):
+    now_timestamp = datetime.now(timezone.utc).timestamp()
 
-        return {
-            "status": "failed",
-            "job_id": job_id,
-            "error": str(exc),
-        }
+    due_job_ids = get_due_delayed_jobs(
+        queue_name=queue_name,
+        now_timestamp=now_timestamp,
+        limit=limit,
+    )
+
+    moved_jobs = []
+
+    for job_id in due_job_ids:
+        job = db.query(JobDB).filter(JobDB.id == job_id).first()
+
+        if job is None:
+            remove_delayed_job(queue_name, job_id)
+            continue
+
+        if job.status != JobStatus.pending.value:
+            remove_delayed_job(queue_name, job_id)
+            continue
+
+        remove_delayed_job(queue_name, job_id)
+        enqueue_ready_job(job.queue_name, job.id, job.priority)
+
+        job.status = JobStatus.queued.value
+
+        db.commit()
+        db.refresh(job)
+
+        moved_jobs.append(db_job_to_response(job))
+
+    return moved_jobs
