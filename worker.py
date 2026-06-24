@@ -1,13 +1,14 @@
 import argparse
 import time
+from uuid import uuid4
 
 from app.database import SessionLocal
 from app.queue_ops import pop_ready_job
 from app.services import execute_job
 
 
-def run_worker(queue_name: str, poll_interval: float):
-    print(f"Worker started for queue='{queue_name}'")
+def run_worker(queue_name: str, poll_interval: float, worker_id: str):
+    print(f"Worker started: worker_id='{worker_id}', queue='{queue_name}'")
 
     while True:
         job_id = pop_ready_job(queue_name)
@@ -22,7 +23,7 @@ def run_worker(queue_name: str, poll_interval: float):
         db = SessionLocal()
 
         try:
-            result = execute_job(db, job_id)
+            result = execute_job(db, job_id, worker_id)
             print(f"Result: {result}")
 
         finally:
@@ -33,10 +34,13 @@ def main():
     parser = argparse.ArgumentParser(description="DistQueue worker")
     parser.add_argument("--queue", default="default")
     parser.add_argument("--poll-interval", type=float, default=2.0)
+    parser.add_argument("--worker-id", default=None)
 
     args = parser.parse_args()
 
-    run_worker(args.queue, args.poll_interval)
+    worker_id = args.worker_id or f"worker_{uuid4().hex[:8]}"
+
+    run_worker(args.queue, args.poll_interval, worker_id)
 
 
 if __name__ == "__main__":

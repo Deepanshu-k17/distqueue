@@ -9,9 +9,11 @@ from app.queue_ops import enqueue_delayed_job, enqueue_ready_job
 from app.tasks import execute_task
 
 from app.queue_ops import (
+    enqueue_dead_job,
     enqueue_delayed_job,
     enqueue_ready_job,
     get_due_delayed_jobs,
+    list_dead_jobs,
     remove_delayed_job,
 )
 
@@ -130,19 +132,26 @@ def get_job_db_object(db: Session, job_id: str):
     return db.query(JobDB).filter(JobDB.id == job_id).first()
 
 
-def mark_job_running(db: Session, job: JobDB):
+def mark_job_running(db: Session, job: JobDB, worker_id: str):
     job.status = JobStatus.running.value
+    job.locked_by = worker_id
+    job.locked_at = datetime.now(timezone.utc)
+
     db.commit()
     db.refresh(job)
-    return job
 
+    return job
 
 def mark_job_done(db: Session, job: JobDB):
     job.status = JobStatus.done.value
     job.completed_at = datetime.now(timezone.utc)
     job.error_message = None
+    job.locked_by = None
+    job.locked_at = None
+
     db.commit()
     db.refresh(job)
+
     return job
 
 
@@ -156,6 +165,8 @@ def mark_job_failed(db: Session, job: JobDB, error_message: str):
 
         job.status = JobStatus.pending.value
         job.run_at = retry_at
+        job.locked_by = None
+        job.locked_at = None
 
         db.commit()
         db.refresh(job)
@@ -176,20 +187,27 @@ def mark_job_failed(db: Session, job: JobDB, error_message: str):
             "error": error_message,
         }
 
-    job.status = JobStatus.failed.value
+    job.status = JobStatus.dead.value
+    job.locked_by = None
+    job.locked_at = None
 
     db.commit()
     db.refresh(job)
 
+    enqueue_dead_job(
+        queue_name=job.queue_name,
+        job_id=job.id,
+    )
+
     return {
-        "status": "failed",
+        "status": "dead",
         "job_id": job.id,
         "attempts": job.attempts,
         "max_retries": job.max_retries,
         "error": error_message,
     }
 
-def execute_job(db: Session, job_id: str):
+def execute_job(db: Session, job_id: str, worker_id: str):
     job = get_job_db_object(db, job_id)
 
     if job is None:
@@ -201,6 +219,7 @@ def execute_job(db: Session, job_id: str):
     if job.status in [
         JobStatus.done.value,
         JobStatus.cancelled.value,
+        JobStatus.dead.value,
     ]:
         return {
             "status": "skipped",
@@ -208,7 +227,7 @@ def execute_job(db: Session, job_id: str):
             "reason": f"Job already {job.status}",
         }
 
-    mark_job_running(db, job)
+    mark_job_running(db, job, worker_id)
 
     try:
         execute_task(job.task_type, job.payload)
@@ -221,6 +240,7 @@ def execute_job(db: Session, job_id: str):
 
     except Exception as exc:
         return mark_job_failed(db, job, str(exc))
+
 def move_due_delayed_jobs(db: Session, queue_name: str, limit: int = 100):
     now_timestamp = datetime.now(timezone.utc).timestamp()
 
@@ -254,3 +274,70 @@ def move_due_delayed_jobs(db: Session, queue_name: str, limit: int = 100):
         moved_jobs.append(db_job_to_response(job))
 
     return moved_jobs
+
+def get_dead_jobs(db: Session, queue_name: str = "default"):
+    dead_job_ids = list_dead_jobs(queue_name)
+
+    dead_jobs = []
+
+    for job_id in dead_job_ids:
+        job = db.query(JobDB).filter(JobDB.id == job_id).first()
+
+        if job is not None:
+            dead_jobs.append(db_job_to_response(job))
+
+    return dead_jobs
+
+def retry_dead_job(db: Session, job_id: str):
+    job = db.query(JobDB).filter(JobDB.id == job_id).first()
+
+    if job is None:
+        return None
+
+    if job.status != JobStatus.dead.value:
+        return "invalid_state"
+
+    job.status = JobStatus.queued.value
+    job.error_message = None
+    job.run_at = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(job)
+
+    enqueue_ready_job(job.queue_name, job.id, job.priority)
+
+    return db_job_to_response(job)
+
+def recover_stuck_jobs(
+    db: Session,
+    queue_name: str,
+    lock_timeout_seconds: int = 30,
+    limit: int = 100,
+):
+    cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=lock_timeout_seconds)
+
+    stuck_jobs = (
+        db.query(JobDB)
+        .filter(JobDB.queue_name == queue_name)
+        .filter(JobDB.status == JobStatus.running.value)
+        .filter(JobDB.locked_at.isnot(None))
+        .filter(JobDB.locked_at < cutoff_time)
+        .limit(limit)
+        .all()
+    )
+
+    recovered_jobs = []
+
+    for job in stuck_jobs:
+        job.status = JobStatus.queued.value
+        job.locked_by = None
+        job.locked_at = None
+
+        db.commit()
+        db.refresh(job)
+
+        enqueue_ready_job(job.queue_name, job.id, job.priority)
+
+        recovered_jobs.append(db_job_to_response(job))
+
+    return recovered_jobs

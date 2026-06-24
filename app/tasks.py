@@ -60,5 +60,15 @@ def execute_task(task_type: str, payload: dict):
 
     if task_type == "unstable_task":
         return unstable_task(payload)
+    
+    if task_type == "long_task":
+        return long_task(payload)
 
     raise ValueError(f"Unknown task_type: {task_type}")
+
+def long_task(payload: dict):
+    seconds = payload.get("seconds", 60)
+    time.sleep(seconds)
+    return {
+        "message": f"Long task completed after {seconds} seconds"
+    }

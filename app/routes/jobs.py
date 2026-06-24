@@ -21,6 +21,30 @@ def list_jobs(
 ):
     return services.list_jobs(db, status_filter)
 
+@router.get("/dead", response_model=list[JobResponse])
+def get_dead_jobs(
+    queue: str = "default",
+    db: Session = Depends(get_db),
+):
+    return services.get_dead_jobs(db, queue)
+
+@router.post("/{job_id}/retry", response_model=JobResponse)
+def retry_dead_job(job_id: str, db: Session = Depends(get_db)):
+    result = services.retry_dead_job(db, job_id)
+
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found",
+        )
+
+    if result == "invalid_state":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only dead jobs can be manually retried",
+        )
+
+    return result
 
 @router.get("/{job_id}", response_model=JobResponse)
 def get_job(job_id: str, db: Session = Depends(get_db)):

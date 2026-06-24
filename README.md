@@ -1,28 +1,30 @@
 # DistQueue
 
-DistQueue is a Redis-backed distributed task queue engine built step by step using FastAPI, PostgreSQL, Redis, SQLAlchemy, and Python worker processes.
+DistQueue is a Redis-backed distributed task queue engine built with FastAPI, PostgreSQL, Redis, SQLAlchemy, and Python worker processes.
 
-The final goal is to build a backend system where users can submit jobs through an API, store durable job metadata in PostgreSQL, dispatch jobs through Redis queues, execute them using workers, support delayed jobs, retries, dead-letter queues, crash recovery, metrics, benchmarking, and Docker-based local setup.
-
-This project is being built incrementally to understand backend systems properly instead of directly copy-pasting a large system.
+It supports job submission through an API, durable job metadata storage in PostgreSQL, Redis-based queue dispatch, delayed jobs, automatic retries, dead-letter queues, worker execution, and worker crash recovery using leases.
 
 ---
 
-## Current Status
+## Features
 
-Implemented so far:
+* FastAPI-based job submission API
+* PostgreSQL-backed persistent job storage
+* Redis sorted sets for ready, delayed, and dead-letter queues
+* Priority-based job dispatch
+* Delayed job scheduling
+* Background worker process for job execution
+* Scheduler process for delayed jobs and stuck-job recovery
+* Retry system with exponential backoff
+* Dead-letter queue for exhausted jobs
+* Worker leases using `locked_by` and `locked_at`
+* Crash recovery for jobs stuck in `running`
+* Job lifecycle tracking with timestamps and error messages
+* Clean backend structure using routes, schemas, services, and database models
 
-* FastAPI backend
-* Clean route/schema/service/model structure
-* PostgreSQL persistence
-* Redis ready and delayed queues
-* Basic worker process
-* Dummy task execution
-* Job lifecycle updates
-* Error tracking
-* Completion timestamp tracking
+---
 
-Current flow:
+## Architecture
 
 ```text
 Client
@@ -31,22 +33,24 @@ FastAPI API
   ↓
 PostgreSQL stores full job metadata
   ↓
-Redis stores job_id for queue ordering
+Redis stores job IDs for queue ordering
   ↓
-worker.py pops job_id from Redis
+Worker processes execute jobs
   ↓
-Worker loads job from PostgreSQL
-  ↓
-Worker executes task
-  ↓
-Worker updates job status in PostgreSQL
+Scheduler handles delayed jobs and stuck-job recovery
 ```
+
+PostgreSQL is the durable source of truth.
+
+Redis is the fast dispatch layer.
+
+Workers execute tasks.
+
+The scheduler moves delayed jobs into the ready queue and recovers stuck running jobs.
 
 ---
 
 ## Tech Stack
-
-Current:
 
 * Python
 * FastAPI
@@ -56,16 +60,6 @@ Current:
 * SQLAlchemy
 * Redis
 * Docker Compose
-
-Planned:
-
-* Scheduler process
-* Retry system
-* Dead-letter queue
-* Worker leases and crash recovery
-* Metrics endpoint
-* Benchmarking script
-* WebSocket monitoring dashboard
 
 ---
 
@@ -89,6 +83,7 @@ distqueue/
       __init__.py
       jobs.py
   worker.py
+  scheduler.py
   docker-compose.yml
   requirements.txt
   README.md
@@ -99,20 +94,24 @@ distqueue/
 
 ## API Endpoints
 
-| Method  | Endpoint                      | Purpose                 |
-| ------- | ----------------------------- | ----------------------- |
-| `GET`   | `/`                           | Check if API is running |
-| `GET`   | `/health`                     | Health check endpoint   |
-| `POST`  | `/jobs`                       | Create a new job        |
-| `GET`   | `/jobs`                       | List all jobs           |
-| `GET`   | `/jobs?status_filter=pending` | Filter jobs by status   |
-| `GET`   | `/jobs/{job_id}`              | Get a specific job      |
-| `PATCH` | `/jobs/{job_id}/status`       | Update job status       |
-| `POST`  | `/jobs/{job_id}/cancel`       | Cancel a job            |
+| Method  | Endpoint                      | Purpose                   |
+| ------- | ----------------------------- | ------------------------- |
+| `GET`   | `/`                           | Check if API is running   |
+| `GET`   | `/health`                     | Health check endpoint     |
+| `POST`  | `/jobs`                       | Create a new job          |
+| `GET`   | `/jobs`                       | List all jobs             |
+| `GET`   | `/jobs?status_filter=pending` | Filter jobs by status     |
+| `GET`   | `/jobs/dead?queue=default`    | List dead-letter jobs     |
+| `GET`   | `/jobs/{job_id}`              | Get a specific job        |
+| `PATCH` | `/jobs/{job_id}/status`       | Update job status         |
+| `POST`  | `/jobs/{job_id}/cancel`       | Cancel a job              |
+| `POST`  | `/jobs/{job_id}/retry`        | Manually retry a dead job |
 
 ---
 
-## Example Job Creation Request
+## Job Creation Example
+
+Request:
 
 ```json
 {
@@ -127,7 +126,7 @@ distqueue/
 }
 ```
 
-Example response:
+Response:
 
 ```json
 {
@@ -153,9 +152,9 @@ Example response:
 
 ---
 
-## Job Status Values
+## Job Lifecycle
 
-Allowed job statuses:
+Supported job statuses:
 
 ```text
 pending
@@ -163,79 +162,92 @@ queued
 running
 done
 failed
+dead
 cancelled
 ```
 
-Status lifecycle currently supported:
+Common lifecycle flows:
 
 ```text
-queued -> running -> done
-queued -> running -> failed
-pending -> cancelled
-queued -> cancelled
-running -> cancelled
+Immediate job:
+pending → queued → running → done
+```
+
+```text
+Delayed job:
+pending → queued → running → done
+```
+
+```text
+Retryable failure:
+queued → running → pending → queued → running → done
+```
+
+```text
+Exhausted failure:
+queued → running → pending → queued → running → dead
+```
+
+```text
+Worker crash recovery:
+queued → running → queued → running → done
 ```
 
 ---
 
 ## Job Fields
 
-| Field                  | Purpose                             |
-| ---------------------- | ----------------------------------- |
-| `job_id`               | Unique job identifier               |
-| `queue` / `queue_name` | Queue where the job belongs         |
-| `task_type`            | Type of task to execute             |
-| `payload`              | Task input data                     |
-| `priority`             | Job priority from 1 to 10           |
-| `status`               | Current lifecycle state             |
-| `attempts`             | Number of execution attempts        |
-| `max_retries`          | Maximum retries allowed             |
-| `run_at`               | Time when job is eligible to run    |
-| `locked_by`            | Worker that claimed the job         |
-| `locked_at`            | Time when worker claimed the job    |
-| `error_message`        | Failure reason if job fails         |
-| `completed_at`         | Time when job finishes successfully |
-| `created_at`           | Job creation timestamp              |
-| `updated_at`           | Last update timestamp               |
+| Field                  | Purpose                                   |
+| ---------------------- | ----------------------------------------- |
+| `job_id`               | Unique job identifier                     |
+| `queue` / `queue_name` | Queue where the job belongs               |
+| `task_type`            | Type of task to execute                   |
+| `payload`              | Task input data                           |
+| `priority`             | Job priority from 1 to 10                 |
+| `status`               | Current lifecycle state                   |
+| `attempts`             | Number of failed execution attempts       |
+| `max_retries`          | Maximum retry attempts allowed            |
+| `run_at`               | Time when the job becomes eligible to run |
+| `locked_by`            | Worker that claimed the job               |
+| `locked_at`            | Time when the worker claimed the job      |
+| `error_message`        | Failure reason if the job fails           |
+| `completed_at`         | Time when the job finishes successfully   |
+| `created_at`           | Job creation timestamp                    |
+| `updated_at`           | Last update timestamp                     |
 
 ---
 
 ## Redis Queues
 
-Redis is used as the fast queue dispatch layer.
-
-PostgreSQL stores full durable job metadata.
-
-Redis stores only job IDs and scores.
+DistQueue uses Redis sorted sets for queue ordering.
 
 Current Redis keys:
 
 ```text
 queue:default:ready
 queue:default:delayed
+queue:default:dead
 ```
 
 ### Ready Queue
 
-Immediate jobs go into:
+Immediate jobs are added to:
 
 ```text
 queue:{queue_name}:ready
 ```
 
-Ready queue uses Redis sorted sets.
-
-Score logic:
+Ready queue score:
 
 ```text
 score = (-priority * 1_000_000_000) + current_timestamp_ms
 ```
 
-Higher priority jobs receive lower scores, so they are picked earlier by Redis.
+Higher-priority jobs get lower scores, so they are picked earlier.
 
 ### Delayed Queue
 
-Delayed jobs go into:
+Delayed jobs and retry jobs are added to:
 
 ```text
 queue:{queue_name}:delayed
@@ -247,7 +259,21 @@ Delayed queue score:
 score = run_at_timestamp
 ```
 
-Later, the scheduler will move jobs from delayed queue to ready queue when `run_at <= current_time`.
+The scheduler moves jobs into the ready queue when:
+
+```text
+run_at <= current_time
+```
+
+### Dead-Letter Queue
+
+Jobs that exhaust their retry attempts are added to:
+
+```text
+queue:{queue_name}:dead
+```
+
+Redis stores only job IDs. PostgreSQL stores the full job metadata.
 
 ---
 
@@ -258,7 +284,7 @@ The worker is a separate long-running process that picks jobs from Redis and exe
 Run worker:
 
 ```bash
-python worker.py --queue default --poll-interval 2
+python worker.py --queue default --worker-id worker_1 --poll-interval 2
 ```
 
 Worker flow:
@@ -272,48 +298,150 @@ Load job from PostgreSQL
   ↓
 Mark job running
   ↓
+Set locked_by and locked_at
+  ↓
 Execute task
   ↓
-If success: mark done and set completed_at
-  ↓
-If failure: mark failed and store error_message
+Mark done, schedule retry, or move to dead-letter queue
 ```
 
-Currently supported dummy tasks:
+Supported task types:
 
 ```text
 sleep_task
 echo_task
 fail_task
+unstable_task
+long_task
 ```
 
-Example successful task:
+---
 
-```json
-{
-  "queue": "default",
-  "task_type": "sleep_task",
-  "payload": {
-    "seconds": 3
-  },
-  "priority": 8,
-  "delay_seconds": 0,
-  "max_retries": 3
-}
+## Scheduler
+
+The scheduler is a separate long-running process that handles delayed jobs and stuck running jobs.
+
+Run scheduler:
+
+```bash
+python scheduler.py --queue default --poll-interval 2 --lock-timeout 30
 ```
 
-Example failing task:
+Scheduler responsibilities:
 
-```json
-{
-  "queue": "default",
-  "task_type": "fail_task",
-  "payload": {},
-  "priority": 5,
-  "delay_seconds": 0,
-  "max_retries": 3
-}
+* Move due delayed jobs into the ready queue
+* Move due retry jobs into the ready queue
+* Detect stuck running jobs using `locked_at`
+* Requeue jobs whose worker lease has expired
+
+Scheduler flow:
+
+```text
+Check delayed queue
+  ↓
+Move due jobs to ready queue
+  ↓
+Check running jobs with old locked_at
+  ↓
+Recover stuck jobs
+  ↓
+Sleep and repeat
 ```
+
+---
+
+## Retry System
+
+When a task fails, the worker increments `attempts`.
+
+If the job still has retries left, it is scheduled for retry using exponential backoff.
+
+Retry behavior:
+
+```text
+task fails
+  ↓
+attempts += 1
+  ↓
+if attempts < max_retries:
+    status = pending
+    run_at = now + retry_delay
+    enqueue into delayed queue
+else:
+    status = dead
+    enqueue into dead-letter queue
+```
+
+Retry delay:
+
+```text
+retry_delay = base_delay * 2^attempts
+```
+
+Example with base delay of 5 seconds:
+
+```text
+attempt 1 failure → retry after 10 seconds
+attempt 2 failure → retry after 20 seconds
+attempt 3 failure → retry after 40 seconds
+```
+
+---
+
+## Dead-Letter Queue
+
+The dead-letter queue stores jobs that failed after exhausting all retry attempts.
+
+A job becomes `dead` when:
+
+```text
+attempts >= max_retries
+```
+
+Dead jobs can be inspected through:
+
+```text
+GET /jobs/dead?queue=default
+```
+
+Dead jobs can be manually retried through:
+
+```text
+POST /jobs/{job_id}/retry
+```
+
+---
+
+## Worker Crash Recovery
+
+DistQueue uses worker leases to prevent jobs from getting stuck forever in `running`.
+
+When a worker picks a job:
+
+```text
+status = running
+locked_by = worker_id
+locked_at = current_time
+```
+
+If the worker crashes before finishing, the job stays `running`.
+
+The scheduler checks for running jobs where:
+
+```text
+locked_at < current_time - lock_timeout
+```
+
+Then it recovers the job:
+
+```text
+status = queued
+locked_by = null
+locked_at = null
+job_id reinserted into Redis ready queue
+```
+
+A new worker can then pick and complete the job.
 
 ---
 
@@ -331,7 +459,7 @@ Check containers:
 docker ps
 ```
 
-Expected:
+Expected containers:
 
 ```text
 distqueue-postgres
@@ -363,7 +491,17 @@ Open another terminal:
 ```bash
 cd /mnt/d/projects/distqueue
 source .venv/bin/activate
-python worker.py --queue default --poll-interval 2
+python worker.py --queue default --worker-id worker_1 --poll-interval 2
+```
+
+### 5. Run scheduler
+
+Open another terminal:
+
+```bash
+cd /mnt/d/projects/distqueue
+source .venv/bin/activate
+python scheduler.py --queue default --poll-interval 2 --lock-timeout 30
 ```
 
 ---
@@ -388,16 +526,18 @@ Check delayed queue:
 ZRANGE queue:default:delayed 0 -1 WITHSCORES
 ```
 
-Clear ready queue during development:
+Check dead queue:
+
+```bash
+ZRANGE queue:default:dead 0 -1 WITHSCORES
+```
+
+Clear queues during development:
 
 ```bash
 DEL queue:default:ready
-```
-
-Clear delayed queue during development:
-
-```bash
 DEL queue:default:delayed
+DEL queue:default:dead
 ```
 
 ---
@@ -413,10 +553,10 @@ docker exec -it distqueue-postgres psql -U distqueue -d distqueue
 Check latest jobs:
 
 ```sql
-SELECT id, queue_name, task_type, priority, status, attempts, max_retries, run_at, error_message, completed_at
+SELECT id, queue_name, task_type, priority, status, attempts, max_retries, run_at, locked_by, locked_at, error_message, completed_at
 FROM jobs
 ORDER BY created_at DESC
-LIMIT 5;
+LIMIT 10;
 ```
 
 Exit:
@@ -427,341 +567,120 @@ Exit:
 
 ---
 
-## Day-by-Day Progress
+## Example Tests
 
-### Day 1 — Basic FastAPI Backend
+### Successful Job
 
-Implemented:
-
-* `GET /`
-* `GET /health`
-* `POST /jobs`
-* `GET /jobs/{job_id}`
-* In-memory job storage using a Python dictionary
-
-Learned:
-
-* Backend receives HTTP requests and returns HTTP responses.
-* `GET` fetches data.
-* `POST` sends data to create something.
-* JSON is used to send structured data.
-* FastAPI defines API endpoints using Python functions.
-* Pydantic validates request bodies.
-* In-memory storage is temporary and disappears when the server restarts.
-
----
-
-### Day 2 — Improved Job API
-
-Implemented:
-
-* `GET /jobs`
-* `GET /jobs?status_filter=pending`
-* `PATCH /jobs/{job_id}/status`
-* `POST /jobs/{job_id}/cancel`
-* Job status enum
-* Priority validation
-* Response models
-* Proper HTTP status codes
-
-Learned:
-
-* Path parameters identify specific resources.
-* Query parameters are used for filtering/searching/sorting/pagination.
-* `PATCH` updates part of an existing resource.
-* Enums restrict values to a fixed set.
-* `400` means logically invalid request.
-* `404` means resource not found.
-* `422` means validation failed.
-
----
-
-### Day 3 — Clean Backend Structure
-
-Refactored from one large `main.py` file into a cleaner backend structure.
-
-Added:
-
-```text
-app/
-  main.py
-  models.py
-  schemas.py
-  services.py
-  routes/
-    jobs.py
+```json
+{
+  "queue": "default",
+  "task_type": "sleep_task",
+  "payload": {
+    "seconds": 3
+  },
+  "priority": 8,
+  "delay_seconds": 0,
+  "max_retries": 3
+}
 ```
 
-Learned:
+Expected final status:
 
-* `main.py` should create the app and include routers.
-* `APIRouter` groups related endpoints.
-* `schemas.py` stores request/response models.
-* `services.py` stores business logic.
-* Routes should handle HTTP behavior.
-* Services should handle application logic.
+```text
+done
+```
 
----
+### Delayed Job
 
-### Day 4 — PostgreSQL Persistence
+```json
+{
+  "queue": "default",
+  "task_type": "sleep_task",
+  "payload": {
+    "seconds": 3
+  },
+  "priority": 8,
+  "delay_seconds": 10,
+  "max_retries": 3
+}
+```
 
-Replaced temporary in-memory job storage with PostgreSQL.
+Expected flow:
 
-Added:
+```text
+pending → queued → running → done
+```
 
-* PostgreSQL using Docker Compose
-* SQLAlchemy setup
-* `JobDB` database model
-* Database session dependency using `get_db`
-* Persistent job creation, listing, fetching, updating, and cancellation
-* `created_at` and `updated_at` timestamps
+### Permanently Failing Job
 
-Learned:
+```json
+{
+  "queue": "default",
+  "task_type": "fail_task",
+  "payload": {},
+  "priority": 5,
+  "delay_seconds": 0,
+  "max_retries": 2
+}
+```
 
-* PostgreSQL stores data permanently.
-* SQLAlchemy ORM maps Python classes to database tables.
-* A database session communicates with the database during a request.
-* `db.add()` prepares an object for insertion.
-* `db.commit()` saves changes.
-* `db.refresh()` reloads saved database values into the Python object.
+Expected final status:
 
----
+```text
+dead
+```
 
-### Day 5 — Expanded Job Database Model
+### Crash Recovery Test
 
-Upgraded the job database schema to support real queue features.
+```json
+{
+  "queue": "default",
+  "task_type": "long_task",
+  "payload": {
+    "seconds": 60
+  },
+  "priority": 8,
+  "delay_seconds": 0,
+  "max_retries": 3
+}
+```
 
-Added:
+Test:
 
-* `queue_name`
-* `attempts`
-* `max_retries`
-* `run_at`
-* `locked_by`
-* `locked_at`
-* `error_message`
-* `completed_at`
-* PostgreSQL `JSONB` payload storage
-
-Learned:
-
-* `queue_name` supports multiple queues.
-* `run_at` supports delayed jobs.
-* `attempts` and `max_retries` support retry logic.
-* `locked_by` and `locked_at` support future worker crash recovery.
-* `error_message` stores failure reason.
-* `completed_at` records successful completion time.
-* JSONB stores structured JSON payloads properly in PostgreSQL.
-
----
-
-### Day 6 — Redis Queue Layer
-
-Added Redis as the fast queue dispatch layer.
-
-Implemented:
-
-* Redis container in Docker Compose
-* Redis Python client
-* Ready queue using Redis sorted set
-* Delayed queue using Redis sorted set
-* Immediate jobs enqueued into `queue:{queue_name}:ready`
-* Delayed jobs enqueued into `queue:{queue_name}:delayed`
-* Priority-based score for ready jobs
-* Timestamp-based score for delayed jobs
-
-Learned:
-
-* PostgreSQL stores full job data.
-* Redis stores job IDs for fast queue ordering.
-* Redis sorted sets order members by score.
-* `ZADD` adds a member with a score.
-* `ZRANGE ... WITHSCORES` shows queue order.
-* Higher-priority jobs can be picked earlier by giving them lower scores.
-* Delayed jobs can be ordered using `run_at` timestamps.
-
----
-
-### Day 7 — Basic Worker Process
-
-Added the first worker process for executing queued jobs.
-
-Implemented:
-
-* `worker.py` command-line worker
-* Redis `ZPOPMIN` based ready queue popping
-* Dummy task handlers:
-
-  * `sleep_task`
-  * `echo_task`
-  * `fail_task`
-* Job execution lifecycle:
-
-  * `queued -> running -> done`
-  * `queued -> running -> failed`
-* PostgreSQL status updates from the worker
-* Error tracking using `error_message`
-* Completion tracking using `completed_at`
-
-Learned:
-
-* A worker is a separate long-running process.
-* The API should submit jobs, not execute them.
-* Redis stores the next job ID to process.
-* PostgreSQL stores full job metadata and lifecycle state.
-* `ZPOPMIN` removes and returns the next job from a Redis sorted set.
-* Worker loads job details from PostgreSQL before execution.
-* Successful jobs become `done`.
-* Failed jobs become `failed`.
+```text
+1. Start worker.
+2. Submit long_task.
+3. Confirm job becomes running with locked_by and locked_at.
+4. Kill worker.
+5. Wait for scheduler lock timeout.
+6. Confirm scheduler requeues job.
+7. Start new worker.
+8. Confirm job becomes done.
+```
 
 ---
 
 ## Current Limitations
 
-The system is not complete yet.
-
-Current limitations:
-
-* No scheduler for delayed jobs yet
-* No automatic retry logic yet
-* No dead-letter queue yet
 * No worker concurrency yet
-* No worker crash recovery yet
 * No metrics endpoint yet
 * No benchmark script yet
 * No dashboard yet
 * No Alembic migrations yet
+* No heartbeat system yet
+* No retry jitter yet
+* No idempotency protection for tasks yet
+* Recovered jobs may execute more than once in some edge cases
 
 ---
 
-## Planned Next Steps
+## Planned Improvements
 
-Next major steps:
-
-1. Add scheduler to move due delayed jobs into ready queue.
-2. Add retry system with exponential backoff.
-3. Add dead-letter queue for exhausted jobs.
-4. Add worker leases using `locked_by` and `locked_at`.
-5. Add crash recovery for stuck running jobs.
-6. Add worker concurrency.
-7. Add metrics endpoint.
-8. Add benchmark script.
-9. Add Docker Compose service definitions for API, worker, and scheduler.
-10. Add final README architecture diagrams and resume-ready benchmark results.
-
-
----
-
-### Day 8 — Delayed Job Scheduler
-
-Added a scheduler process to move due delayed jobs into the ready queue.
-
-Implemented:
-
-- `scheduler.py` command-line scheduler
-- Redis `ZRANGEBYSCORE` lookup for due delayed jobs
-- Moving due jobs from `queue:{queue_name}:delayed` to `queue:{queue_name}:ready`
-- Updating delayed job status from `pending` to `queued`
-- End-to-end delayed execution with API, scheduler, worker, Redis, and PostgreSQL
-
-Current scheduler command:
-
-```bash
-python scheduler.py --queue default --poll-interval 2
-```
-
-Delayed job flow:
-
-```text
-POST /jobs with delay_seconds > 0
-  ↓
-PostgreSQL stores job as pending
-  ↓
-Redis delayed queue stores job_id with run_at timestamp score
-  ↓
-scheduler.py finds job when run_at <= current_time
-  ↓
-scheduler moves job_id to ready queue
-  ↓
-worker.py picks job
-  ↓
-worker marks job running then done/failed
-```
-
-What I learned:
-
-- Delayed jobs should not be executed immediately.
-- Redis sorted set scores can represent future execution timestamps.
-- `ZRANGEBYSCORE` can find jobs whose scheduled time has arrived.
-- Scheduler is a separate long-running process.
-- API, scheduler, and worker have separate responsibilities.
-
-Current limitation:
-
-- No retry scheduling yet.
-- No dead-letter queue yet.
-- No worker crash recovery yet.
-- No concurrency yet.
-
-
----
-
-### Day 9 — Retry System with Exponential Backoff
-
-Added automatic retry scheduling for failed jobs.
-
-Implemented:
-
-- Retry-aware failure handling
-- `attempts` increment on task failure
-- `max_retries` based retry limit
-- Exponential backoff retry delay
-- Failed jobs reinserted into Redis delayed queue for future retry
-- Scheduler moves retry jobs back into ready queue when due
-- Worker retries jobs until success or retry limit is reached
-- `unstable_task` for testing jobs that fail first and succeed later
-
-Retry behavior:
-
-```text
-task fails
-  ↓
-attempts += 1
-  ↓
-if attempts < max_retries:
-    status = pending
-    run_at = now + retry_delay
-    enqueue into delayed queue
-else:
-    status = failed
-```
-
-Current retry delay:
-
-```text
-retry_delay = base_delay * 2^attempts
-```
-
-With base delay of 5 seconds:
-
-```text
-attempt 1 failure → retry after 10 seconds
-attempt 2 failure → retry after 20 seconds
-attempt 3 failure → retry after 40 seconds
-```
-
-What I learned:
-
-- Some failures are temporary and should be retried.
-- Retry logic needs attempt tracking.
-- `max_retries` prevents infinite retry loops.
-- Exponential backoff avoids retrying too aggressively.
-- Retry scheduling can reuse the delayed queue mechanism.
-- A job should only become finally failed after exhausting retries.
-
-Current limitations:
-
-- No dead-letter queue yet.
-- No retry jitter yet.
-- `unstable_task` uses in-memory simulation for testing.
-- No worker crash recovery yet.
+* Add configurable worker concurrency
+* Add metrics endpoint
+* Track queue depth, throughput, success/failure counts, and latency
+* Add benchmark script for throughput and p95/p99 latency
+* Add Docker Compose services for API, worker, and scheduler
+* Add basic monitoring dashboard
+* Add Alembic migrations
+* Add stronger task idempotency guarantees

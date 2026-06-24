@@ -11,6 +11,10 @@ def delayed_queue_key(queue_name: str) -> str:
     return f"queue:{queue_name}:delayed"
 
 
+def dead_queue_key(queue_name: str) -> str:
+    return f"queue:{queue_name}:dead"
+
+
 def enqueue_ready_job(queue_name: str, job_id: str, priority: int):
     score = (-priority * 1_000_000_000) + int(time.time() * 1000)
 
@@ -24,6 +28,13 @@ def enqueue_delayed_job(queue_name: str, job_id: str, run_at_timestamp: float):
     redis_client.zadd(
         delayed_queue_key(queue_name),
         {job_id: run_at_timestamp},
+    )
+
+
+def enqueue_dead_job(queue_name: str, job_id: str):
+    redis_client.zadd(
+        dead_queue_key(queue_name),
+        {job_id: int(time.time() * 1000)},
     )
 
 
@@ -49,3 +60,7 @@ def get_due_delayed_jobs(queue_name: str, now_timestamp: float, limit: int = 100
 
 def remove_delayed_job(queue_name: str, job_id: str):
     redis_client.zrem(delayed_queue_key(queue_name), job_id)
+
+
+def list_dead_jobs(queue_name: str, start: int = 0, end: int = -1):
+    return redis_client.zrange(dead_queue_key(queue_name), start, end)
