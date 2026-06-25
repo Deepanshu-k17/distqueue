@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
-
+from sqlalchemy import func
 from app.db_models import JobDB
 from app.models import JobStatus
 from app.schemas import JobCreate
@@ -9,11 +9,14 @@ from app.queue_ops import enqueue_delayed_job, enqueue_ready_job
 from app.tasks import execute_task
 
 from app.queue_ops import (
+    dead_queue_depth,
+    delayed_queue_depth,
     enqueue_dead_job,
     enqueue_delayed_job,
     enqueue_ready_job,
     get_due_delayed_jobs,
     list_dead_jobs,
+    ready_queue_depth,
     remove_delayed_job,
 )
 
@@ -341,3 +344,63 @@ def recover_stuck_jobs(
         recovered_jobs.append(db_job_to_response(job))
 
     return recovered_jobs
+
+def get_queue_metrics(db: Session, queue_name: str = "default"):
+    total_jobs = db.query(JobDB).filter(JobDB.queue_name == queue_name).count()
+
+    status_counts_raw = (
+        db.query(JobDB.status, func.count(JobDB.id))
+        .filter(JobDB.queue_name == queue_name)
+        .group_by(JobDB.status)
+        .all()
+    )
+
+    status_counts = {
+        status: count
+        for status, count in status_counts_raw
+    }
+
+    completed_jobs = (
+        db.query(JobDB)
+        .filter(JobDB.queue_name == queue_name)
+        .filter(JobDB.status == JobStatus.done.value)
+        .filter(JobDB.completed_at.isnot(None))
+        .all()
+    )
+
+    latencies_ms = []
+
+    for job in completed_jobs:
+        if job.created_at is not None and job.completed_at is not None:
+            latency = job.completed_at - job.created_at
+            latencies_ms.append(latency.total_seconds() * 1000)
+
+    average_latency_ms = None
+
+    if latencies_ms:
+        average_latency_ms = sum(latencies_ms) / len(latencies_ms)
+
+    return {
+        "queue": queue_name,
+        "redis": {
+            "ready_queue_depth": ready_queue_depth(queue_name),
+            "delayed_queue_depth": delayed_queue_depth(queue_name),
+            "dead_queue_depth": dead_queue_depth(queue_name),
+        },
+        "database": {
+            "total_jobs": total_jobs,
+            "status_counts": {
+                "pending": status_counts.get(JobStatus.pending.value, 0),
+                "queued": status_counts.get(JobStatus.queued.value, 0),
+                "running": status_counts.get(JobStatus.running.value, 0),
+                "done": status_counts.get(JobStatus.done.value, 0),
+                "failed": status_counts.get(JobStatus.failed.value, 0),
+                "dead": status_counts.get(JobStatus.dead.value, 0),
+                "cancelled": status_counts.get(JobStatus.cancelled.value, 0),
+            },
+        },
+        "latency": {
+            "completed_jobs_count": len(latencies_ms),
+            "average_latency_ms": average_latency_ms,
+        },
+    }

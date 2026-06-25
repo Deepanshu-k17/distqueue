@@ -64,3 +64,14 @@ def remove_delayed_job(queue_name: str, job_id: str):
 
 def list_dead_jobs(queue_name: str, start: int = 0, end: int = -1):
     return redis_client.zrange(dead_queue_key(queue_name), start, end)
+
+def ready_queue_depth(queue_name: str):
+    return redis_client.zcard(ready_queue_key(queue_name))
+
+
+def delayed_queue_depth(queue_name: str):
+    return redis_client.zcard(delayed_queue_key(queue_name))
+
+
+def dead_queue_depth(queue_name: str):
+    return redis_client.zcard(dead_queue_key(queue_name))

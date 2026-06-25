@@ -718,3 +718,55 @@ Also update the features list to include:
 Update current limitations: remove:
 
 - No worker concurrency yet
+
+## Metrics
+
+DistQueue exposes a basic metrics endpoint:
+
+```text
+GET /metrics?queue=default
+
+The metrics endpoint reports:
+
+Redis ready queue depth
+Redis delayed queue depth
+Redis dead-letter queue depth
+Total jobs in PostgreSQL
+Job counts by status
+Completed job count
+Average completion latency
+
+Example response:
+
+{
+  "queue": "default",
+  "redis": {
+    "ready_queue_depth": 0,
+    "delayed_queue_depth": 0,
+    "dead_queue_depth": 1
+  },
+  "database": {
+    "total_jobs": 20,
+    "status_counts": {
+      "pending": 0,
+      "queued": 0,
+      "running": 0,
+      "done": 18,
+      "failed": 0,
+      "dead": 2,
+      "cancelled": 0
+    }
+  },
+  "latency": {
+    "completed_jobs_count": 18,
+    "average_latency_ms": 4230.5
+  }
+}
+
+These metrics help inspect queue health and verify that workers, retries, delayed jobs, and dead-letter handling are behaving correctly.
+
+
+Also add this to your feature list:
+
+```md
+- Queue metrics endpoint
