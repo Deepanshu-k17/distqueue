@@ -684,3 +684,37 @@ Test:
 * Add basic monitoring dashboard
 * Add Alembic migrations
 * Add stronger task idempotency guarantees
+
+## Worker Concurrency
+
+Workers support configurable concurrency using Python `ThreadPoolExecutor`.
+
+Run worker with concurrency:
+
+```bash
+python worker.py --queue default --worker-id worker_1 --concurrency 4 --poll-interval 1
+
+With concurrency enabled, a single worker process starts multiple execution threads.
+
+Example:
+
+worker_1_thread_1
+worker_1_thread_2
+worker_1_thread_3
+worker_1_thread_4
+
+Each thread independently pops jobs from Redis, loads job metadata from PostgreSQL, executes the task, and updates job status.
+
+Redis ZPOPMIN removes jobs atomically, so multiple worker threads do not process the same queued job.
+
+This improves throughput for I/O-bound jobs such as sleep tasks, webhook calls, email tasks, and API calls.
+
+
+Also update the features list to include:
+
+```md
+- Configurable worker concurrency
+
+Update current limitations: remove:
+
+- No worker concurrency yet
