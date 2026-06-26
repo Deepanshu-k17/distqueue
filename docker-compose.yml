@@ -10,12 +10,63 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U distqueue -d distqueue" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7
     container_name: distqueue-redis
     ports:
       - "6379:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    container_name: distqueue-api
+    environment:
+      DATABASE_URL: postgresql://distqueue:distqueue@postgres:5432/distqueue
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build: .
+    container_name: distqueue-worker
+    environment:
+      DATABASE_URL: postgresql://distqueue:distqueue@postgres:5432/distqueue
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python worker.py --queue default --worker-id docker_worker --concurrency 4 --poll-interval 1
+
+  scheduler:
+    build: .
+    container_name: distqueue-scheduler
+    environment:
+      DATABASE_URL: postgresql://distqueue:distqueue@postgres:5432/distqueue
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python scheduler.py --queue default --poll-interval 2 --lock-timeout 30
 
 volumes:
   postgres_data:
