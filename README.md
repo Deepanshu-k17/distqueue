@@ -1,15 +1,25 @@
 # DistQueue
 
-DistQueue is a Redis-backed distributed task queue engine built with FastAPI, PostgreSQL, Redis, SQLAlchemy, and Python worker processes.
+DistQueue is a Redis-backed distributed task queue engine built with FastAPI, PostgreSQL, Redis, SQLAlchemy, Docker Compose, and Python worker processes.
 
-It supports job submission through an API, durable job metadata storage in PostgreSQL, Redis-based queue dispatch, delayed jobs, automatic retries, dead-letter queues, worker execution, and worker crash recovery using leases.
+It supports job submission through an API, durable job metadata storage in PostgreSQL, Redis-based queue dispatch, delayed jobs, automatic retries, dead-letter queues, worker execution, configurable worker concurrency, metrics, benchmarking, and worker crash recovery using leases.
+
+---
+
+## Documentation
+
+* [Architecture](docs/ARCHITECTURE.md)
+* [Interview Notes](docs/INTERVIEW_NOTES.md)
+* [Current Limitations](docs/LIMITATIONS.md)
+* [Crash Recovery Demo](demo/CRASH_RECOVERY.md)
+* [Local Benchmark Results](benchmark_results/local_benchmark.md)
 
 ---
 
 ## Features
 
 * FastAPI-based job submission API
-* PostgreSQL-backed persistent job storage
+* PostgreSQL-backed persistent job metadata
 * Redis sorted sets for ready, delayed, and dead-letter queues
 * Priority-based job dispatch
 * Delayed job scheduling
@@ -17,10 +27,14 @@ It supports job submission through an API, durable job metadata storage in Postg
 * Scheduler process for delayed jobs and stuck-job recovery
 * Retry system with exponential backoff
 * Dead-letter queue for exhausted jobs
+* Manual dead-job inspection and retry
 * Worker leases using `locked_by` and `locked_at`
 * Crash recovery for jobs stuck in `running`
-* Job lifecycle tracking with timestamps and error messages
-* Clean backend structure using routes, schemas, services, and database models
+* Configurable worker concurrency using `ThreadPoolExecutor`
+* Queue metrics endpoint
+* Benchmark script for throughput and latency measurement
+* Docker Compose setup for API, worker, scheduler, PostgreSQL, and Redis
+* Clean backend structure using routes, schemas, services, database models, and queue utilities
 
 ---
 
@@ -37,7 +51,7 @@ Redis stores job IDs for queue ordering
   ↓
 Worker processes execute jobs
   ↓
-Scheduler handles delayed jobs and stuck-job recovery
+Scheduler handles delayed jobs, retries, and stuck-job recovery
 ```
 
 PostgreSQL is the durable source of truth.
@@ -82,8 +96,25 @@ distqueue/
     routes/
       __init__.py
       jobs.py
+      metrics.py
+  scripts/
+    benchmark.py
+    create_jobs.py
+    demo_immediate_job.py
+    demo_delayed_job.py
+    demo_retry_dlq.py
+    demo_metrics.py
+  docs/
+    ARCHITECTURE.md
+    INTERVIEW_NOTES.md
+    LIMITATIONS.md
+  demo/
+    CRASH_RECOVERY.md
+  benchmark_results/
+    local_benchmark.md
   worker.py
   scheduler.py
+  Dockerfile
   docker-compose.yml
   requirements.txt
   README.md
@@ -106,6 +137,7 @@ distqueue/
 | `PATCH` | `/jobs/{job_id}/status`       | Update job status         |
 | `POST`  | `/jobs/{job_id}/cancel`       | Cancel a job              |
 | `POST`  | `/jobs/{job_id}/retry`        | Manually retry a dead job |
+| `GET`   | `/metrics?queue=default`      | Get queue and job metrics |
 
 ---
 
@@ -281,10 +313,10 @@ Redis stores only job IDs. PostgreSQL stores the full job metadata.
 
 The worker is a separate long-running process that picks jobs from Redis and executes them.
 
-Run worker:
+Run worker manually:
 
 ```bash
-python worker.py --queue default --worker-id worker_1 --poll-interval 2
+python worker.py --queue default --worker-id worker_1 --concurrency 4 --poll-interval 1
 ```
 
 Worker flow:
@@ -321,7 +353,7 @@ long_task
 
 The scheduler is a separate long-running process that handles delayed jobs and stuck running jobs.
 
-Run scheduler:
+Run scheduler manually:
 
 ```bash
 python scheduler.py --queue default --poll-interval 2 --lock-timeout 30
@@ -445,37 +477,190 @@ A new worker can then pick and complete the job.
 
 ---
 
-## Running Locally
+## Metrics
 
-### 1. Start PostgreSQL and Redis
-
-```bash
-docker compose up -d
-```
-
-Check containers:
-
-```bash
-docker ps
-```
-
-Expected containers:
+DistQueue exposes a basic metrics endpoint:
 
 ```text
-distqueue-postgres
-distqueue-redis
+GET /metrics?queue=default
 ```
 
-### 2. Activate virtual environment
+The metrics endpoint reports:
+
+* Redis ready queue depth
+* Redis delayed queue depth
+* Redis dead-letter queue depth
+* Total jobs in PostgreSQL
+* Job counts by status
+* Completed job count
+* Average completion latency
+
+Example response:
+
+```json
+{
+  "queue": "default",
+  "redis": {
+    "ready_queue_depth": 0,
+    "delayed_queue_depth": 0,
+    "dead_queue_depth": 1
+  },
+  "database": {
+    "total_jobs": 20,
+    "status_counts": {
+      "pending": 0,
+      "queued": 0,
+      "running": 0,
+      "done": 18,
+      "failed": 0,
+      "dead": 2,
+      "cancelled": 0
+    }
+  },
+  "latency": {
+    "completed_jobs_count": 18,
+    "average_latency_ms": 4230.5
+  }
+}
+```
+
+---
+
+## Benchmark Results
+
+DistQueue includes a benchmark script for submitting jobs, waiting for completion, and calculating throughput and latency.
+
+Run benchmark:
+
+```bash
+python scripts/benchmark.py --jobs 50 --seconds 1
+```
+
+The benchmark reports:
+
+* submitted jobs
+* completed jobs
+* failed/dead/cancelled jobs
+* total benchmark time
+* throughput in jobs/sec
+* average latency
+* p50 latency
+* p95 latency
+* p99 latency
+* min/max latency
+
+Local benchmark with `sleep_task` jobs showed that worker concurrency improves throughput significantly.
+
+For 20 one-second jobs:
+
+| Worker Concurrency |    Throughput | Average Latency | p95 Latency |
+| ------------------ | ------------: | --------------: | ----------: |
+| 1                  | 0.95 jobs/sec |     10893.17 ms | 19458.07 ms |
+| 4                  | 3.37 jobs/sec |      3172.04 ms |  5115.41 ms |
+
+With worker concurrency 4, DistQueue processed 100 one-second jobs at approximately:
+
+```text
+Throughput: 3.72 jobs/sec
+p95 latency: 23210.92 ms
+p99 latency: 24144.64 ms
+```
+
+Benchmark results were collected locally on WSL with PostgreSQL and Redis running through Docker Compose.
+
+Detailed results are available in:
+
+```text
+benchmark_results/local_benchmark.md
+```
+
+---
+
+## Docker Compose Setup
+
+DistQueue can be run using Docker Compose.
+
+Start all services:
+
+```bash
+docker compose up --build
+```
+
+This starts:
+
+* PostgreSQL
+* Redis
+* FastAPI API
+* Worker
+* Scheduler
+
+API docs:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+Useful commands:
+
+```bash
+docker logs -f distqueue-api
+docker logs -f distqueue-worker
+docker logs -f distqueue-scheduler
+```
+
+Stop services:
+
+```bash
+docker compose down
+```
+
+Stop services and delete database volume:
+
+```bash
+docker compose down -v
+```
+
+Inside Docker Compose, API, worker, and scheduler connect to PostgreSQL and Redis using service names:
+
+```text
+postgres:5432
+redis:6379
+```
+
+not `localhost`.
+
+---
+
+## Running Locally Without Dockerized API/Worker
+
+Start PostgreSQL and Redis:
+
+```bash
+docker compose up -d postgres redis
+```
+
+Activate virtual environment:
 
 ```bash
 source .venv/bin/activate
 ```
 
-### 3. Run FastAPI server
+Run FastAPI server:
 
 ```bash
 python -m uvicorn app.main:app --reload
+```
+
+Run worker:
+
+```bash
+python worker.py --queue default --worker-id worker_1 --concurrency 4 --poll-interval 1
+```
+
+Run scheduler:
+
+```bash
+python scheduler.py --queue default --poll-interval 2 --lock-timeout 30
 ```
 
 Open API docs:
@@ -484,24 +669,39 @@ Open API docs:
 http://127.0.0.1:8000/docs
 ```
 
-### 4. Run worker
+---
 
-Open another terminal:
+## Demo Scripts
+
+DistQueue includes demo scripts for verifying core queue behavior.
+
+Run the full system:
 
 ```bash
-cd /mnt/d/projects/distqueue
-source .venv/bin/activate
-python worker.py --queue default --worker-id worker_1 --poll-interval 2
+docker compose up --build
 ```
 
-### 5. Run scheduler
-
-Open another terminal:
+Then run demos from another terminal:
 
 ```bash
-cd /mnt/d/projects/distqueue
 source .venv/bin/activate
-python scheduler.py --queue default --poll-interval 2 --lock-timeout 30
+python scripts/demo_immediate_job.py
+python scripts/demo_delayed_job.py
+python scripts/demo_retry_dlq.py
+python scripts/demo_metrics.py
+```
+
+The demo scripts cover:
+
+* immediate job execution
+* delayed job scheduling
+* retry and dead-letter queue behavior
+* metrics endpoint output
+
+Crash recovery is documented separately:
+
+```text
+demo/CRASH_RECOVERY.md
 ```
 
 ---
@@ -662,111 +862,28 @@ Test:
 
 ## Current Limitations
 
-* No worker concurrency yet
-* No metrics endpoint yet
-* No benchmark script yet
-* No dashboard yet
 * No Alembic migrations yet
+* No production-grade observability yet
+* No dashboard yet
+* No authentication or authorization
+* No rate limiting
+* No retry jitter
 * No heartbeat system yet
-* No retry jitter yet
-* No idempotency protection for tasks yet
+* No strong idempotency guarantees for tasks
+* Thread-based concurrency is better for I/O-bound tasks than CPU-heavy tasks
 * Recovered jobs may execute more than once in some edge cases
 
 ---
 
 ## Planned Improvements
 
-* Add configurable worker concurrency
-* Add metrics endpoint
-* Track queue depth, throughput, success/failure counts, and latency
-* Add benchmark script for throughput and p95/p99 latency
-* Add Docker Compose services for API, worker, and scheduler
-* Add basic monitoring dashboard
 * Add Alembic migrations
-* Add stronger task idempotency guarantees
-
-## Worker Concurrency
-
-Workers support configurable concurrency using Python `ThreadPoolExecutor`.
-
-Run worker with concurrency:
-
-```bash
-python worker.py --queue default --worker-id worker_1 --concurrency 4 --poll-interval 1
-
-With concurrency enabled, a single worker process starts multiple execution threads.
-
-Example:
-
-worker_1_thread_1
-worker_1_thread_2
-worker_1_thread_3
-worker_1_thread_4
-
-Each thread independently pops jobs from Redis, loads job metadata from PostgreSQL, executes the task, and updates job status.
-
-Redis ZPOPMIN removes jobs atomically, so multiple worker threads do not process the same queued job.
-
-This improves throughput for I/O-bound jobs such as sleep tasks, webhook calls, email tasks, and API calls.
-
-
-Also update the features list to include:
-
-```md
-- Configurable worker concurrency
-
-Update current limitations: remove:
-
-- No worker concurrency yet
-
-## Metrics
-
-DistQueue exposes a basic metrics endpoint:
-
-```text
-GET /metrics?queue=default
-
-The metrics endpoint reports:
-
-Redis ready queue depth
-Redis delayed queue depth
-Redis dead-letter queue depth
-Total jobs in PostgreSQL
-Job counts by status
-Completed job count
-Average completion latency
-
-Example response:
-
-{
-  "queue": "default",
-  "redis": {
-    "ready_queue_depth": 0,
-    "delayed_queue_depth": 0,
-    "dead_queue_depth": 1
-  },
-  "database": {
-    "total_jobs": 20,
-    "status_counts": {
-      "pending": 0,
-      "queued": 0,
-      "running": 0,
-      "done": 18,
-      "failed": 0,
-      "dead": 2,
-      "cancelled": 0
-    }
-  },
-  "latency": {
-    "completed_jobs_count": 18,
-    "average_latency_ms": 4230.5
-  }
-}
-
-These metrics help inspect queue health and verify that workers, retries, delayed jobs, and dead-letter handling are behaving correctly.
-
-
-Also add this to your feature list:
-
-```md
-- Queue metrics endpoint
+* Add task idempotency keys
+* Add retry jitter
+* Add p50/p95/p99 metrics endpoint
+* Add dashboard
+* Add authentication
+* Add rate limiting
+* Add structured logging
+* Add pytest test suite
+* Add Kubernetes deployment examples
