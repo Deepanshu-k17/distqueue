@@ -1,5 +1,10 @@
 # DistQueue
 
+**Live API Docs:** https://distqueue.onrender.com/docs
+**Health Check:** https://distqueue.onrender.com/health
+
+> The public deployment exposes the FastAPI API and Swagger documentation. Full queue execution requires the worker and scheduler processes, which are included in the Docker Compose setup. Hosted background workers require a paid Render plan, so the complete system is intended to be run locally with Docker Compose.
+
 DistQueue is a Redis-backed distributed task queue engine built with FastAPI, PostgreSQL, Redis, SQLAlchemy, Docker Compose, and Python worker processes.
 
 It supports job submission through an API, durable job metadata storage in PostgreSQL, Redis-based queue dispatch, delayed jobs, automatic retries, dead-letter queues, worker execution, configurable worker concurrency, metrics, benchmarking, and worker crash recovery using leases.
@@ -40,6 +45,8 @@ It supports job submission through an API, durable job metadata storage in Postg
 
 ## Architecture
 
+DistQueue separates job submission, durable state, fast dispatch, execution, and recovery into independent components.
+
 ```text
 Client
   ↓
@@ -54,13 +61,190 @@ Worker processes execute jobs
 Scheduler handles delayed jobs, retries, and stuck-job recovery
 ```
 
-PostgreSQL is the durable source of truth.
+### Component Responsibilities
 
-Redis is the fast dispatch layer.
+| Component      | Responsibility                                                                                                 |
+| -------------- | -------------------------------------------------------------------------------------------------------------- |
+| FastAPI API    | Accepts job requests, validates payloads, creates job records, exposes job/metrics endpoints                   |
+| PostgreSQL     | Stores durable job metadata, lifecycle state, attempts, timestamps, payloads, lock metadata, and error details |
+| Redis          | Stores job IDs in sorted sets for ready, delayed, retry, and dead-letter queues                                |
+| Worker         | Pops ready jobs from Redis, loads job details from PostgreSQL, executes tasks, and updates status              |
+| Scheduler      | Moves due delayed/retry jobs to ready queue and recovers stuck running jobs                                    |
+| Docker Compose | Runs API, worker, scheduler, PostgreSQL, and Redis together locally                                            |
 
-Workers execute tasks.
+---
 
-The scheduler moves delayed jobs into the ready queue and recovers stuck running jobs.
+## Detailed System Flow
+
+### Immediate Job Flow
+
+```text
+POST /jobs
+  ↓
+FastAPI validates request
+  ↓
+Job metadata is stored in PostgreSQL
+  ↓
+Job ID is added to Redis ready queue
+  ↓
+Worker pops job ID using ZPOPMIN
+  ↓
+Worker loads full job from PostgreSQL
+  ↓
+Worker marks job running
+  ↓
+Worker executes task
+  ↓
+Worker marks job done or schedules retry/dead-letter handling
+```
+
+### Delayed Job Flow
+
+```text
+POST /jobs with delay_seconds > 0
+  ↓
+Job is stored in PostgreSQL as pending
+  ↓
+Job ID is added to Redis delayed queue with run_at timestamp as score
+  ↓
+Scheduler checks delayed queue
+  ↓
+When run_at <= current_time, scheduler moves job to ready queue
+  ↓
+Worker executes job
+```
+
+### Retry Flow
+
+```text
+Worker executes task
+  ↓
+Task fails
+  ↓
+attempts += 1
+  ↓
+If attempts < max_retries:
+    status = pending
+    run_at = now + exponential_backoff_delay
+    job ID goes to delayed queue
+  ↓
+If attempts >= max_retries:
+    status = dead
+    job ID goes to dead-letter queue
+```
+
+### Crash Recovery Flow
+
+```text
+Worker picks job
+  ↓
+status = running
+locked_by = worker_id
+locked_at = current_time
+  ↓
+Worker crashes before completion
+  ↓
+Job remains stuck in running
+  ↓
+Scheduler detects locked_at older than lock timeout
+  ↓
+Scheduler clears lock and requeues job
+  ↓
+Another worker can complete it
+```
+
+---
+
+## Key Design Trade-offs
+
+### PostgreSQL + Redis Instead of Only PostgreSQL
+
+DistQueue uses both PostgreSQL and Redis because they solve different problems.
+
+```text
+PostgreSQL = durable metadata and queryable job state
+Redis = fast queue ordering and dispatch
+```
+
+PostgreSQL stores full job information such as payload, status, attempts, timestamps, errors, and lock metadata. Redis stores only job IDs in sorted sets.
+
+**Trade-off:** This adds operational complexity because the system has two data stores, but it keeps durable state reliable while making queue dispatch fast and simple.
+
+---
+
+### Redis Sorted Sets Instead of Lists
+
+Redis sorted sets are used because DistQueue needs priority queues and delayed queues.
+
+Ready queue score:
+
+```text
+score = (-priority * 1_000_000_000) + current_timestamp_ms
+```
+
+Delayed queue score:
+
+```text
+score = run_at_timestamp
+```
+
+This lets Redis order jobs by priority or scheduled execution time.
+
+**Trade-off:** Sorted sets are more complex than simple lists, but they support priority ordering and delayed execution cleanly.
+
+---
+
+### At-Least-Once Execution Instead of Exactly-Once Execution
+
+DistQueue provides at-least-once execution behavior.
+
+If a worker crashes after partially executing a task, the scheduler may recover and requeue the job. This means the same job may execute more than once in some edge cases.
+
+**Trade-off:** At-least-once execution is simpler and realistic for a learning-focused queue engine. Exactly-once execution would require stronger idempotency guarantees, deduplication, transactional task design, or external idempotency keys.
+
+---
+
+### Thread-Based Worker Concurrency
+
+Worker concurrency is implemented using Python `ThreadPoolExecutor`.
+
+This works well for I/O-bound tasks such as sleep tasks, webhooks, email sending, and API calls.
+
+**Trade-off:** Thread-based concurrency is not ideal for CPU-heavy tasks because of Python’s GIL. CPU-bound workloads would need multiprocessing, external workers, or a different execution model.
+
+---
+
+### Simple Exponential Backoff Without Jitter
+
+Retries use exponential backoff:
+
+```text
+retry_delay = base_delay * 2^attempts
+```
+
+**Trade-off:** This is simple and predictable, but production systems often add jitter to avoid many failed jobs retrying at exactly the same time.
+
+---
+
+### Lease-Based Crash Recovery Instead of Heartbeats
+
+DistQueue uses `locked_by` and `locked_at` to detect stuck jobs.
+
+If a job remains `running` beyond the lock timeout, the scheduler assumes the worker crashed and requeues it.
+
+**Trade-off:** This is simple and effective, but it does not include worker heartbeats yet. A long-running valid task could be incorrectly recovered if the lock timeout is too short.
+
+---
+
+### Development Migrations Instead of Alembic
+
+The project currently uses SQLAlchemy table creation during app startup.
+
+```python
+Base.metadata.create_all(bind=engine)
+```
+
+**Trade-off:** This is acceptable for a prototype, but production systems should use Alembic migrations for controlled schema changes.
 
 ---
 
@@ -860,17 +1044,29 @@ Test:
 
 ---
 
-## Live Demo
+## Live Deployment Note
 
-API Docs: https://distqueue.onrender.com/docs  
-Health Check: https://distqueue.onrender.com/health
+The deployed Render link exposes the FastAPI API and Swagger documentation:
 
-The public deployment exposes the FastAPI API and Swagger documentation.
+```text
+https://distqueue.onrender.com/docs
+```
 
-Full queue execution requires the worker and scheduler processes. Since hosted background workers require a paid Render plan, the complete system is intended to be run locally using Docker Compose:
+The complete queue execution flow requires worker and scheduler processes. Hosted background workers require a paid Render plan, so the full system is intended to be run locally using Docker Compose:
 
 ```bash
 docker compose up --build
+```
+
+This starts:
+
+* FastAPI API
+* PostgreSQL
+* Redis
+* Worker
+* Scheduler
+
+---
 
 ## Current Limitations
 
