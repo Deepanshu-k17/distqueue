@@ -32,6 +32,8 @@ p95 latency: 12182.25 ms
 p99 latency: 13119.80 ms
 Min latency: 1745.86 ms
 Max latency: 13141.54 ms
+
+
 Benchmark 2 — 100 jobs, worker concurrency 4
 
 Command:
@@ -52,6 +54,8 @@ p95 latency: 23210.92 ms
 p99 latency: 24144.64 ms
 Min latency: 1278.03 ms
 Max latency: 24164.08 ms
+
+
 Benchmark 3 — 20 jobs, worker concurrency 1
 
 Command:
@@ -73,6 +77,8 @@ p95 latency: 19458.07 ms
 p99 latency: 19458.07 ms
 Min latency: 1350.21 ms
 Max latency: 20458.08 ms
+
+
 Benchmark 4 — 20 jobs, worker concurrency 4
 
 Command:
