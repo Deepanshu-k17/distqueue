@@ -860,6 +860,18 @@ Test:
 
 ---
 
+## Live Demo
+
+API Docs: https://distqueue.onrender.com/docs  
+Health Check: https://distqueue.onrender.com/health
+
+The public deployment exposes the FastAPI API and Swagger documentation.
+
+Full queue execution requires the worker and scheduler processes. Since hosted background workers require a paid Render plan, the complete system is intended to be run locally using Docker Compose:
+
+```bash
+docker compose up --build
+
 ## Current Limitations
 
 * No Alembic migrations yet
